@@ -27,26 +27,54 @@ const state = {
 
 window.addEventListener('DOMContentLoaded', initialize);
 
+function getApiUrl() {
+  return localStorage.getItem('littlelog-api-url') || '';
+}
+
+async function callApi(action, payload = {}) {
+  const url = getApiUrl();
+  if (!url) {
+    throw new Error('Apps Script Web App URL is not configured.');
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    body: JSON.stringify({ action, ...payload })
+  });
+  return await response.json();
+}
+
 async function initialize() {
   const saved = JSON.parse(localStorage.getItem('littlelog-settings') || '{}');
   state.profile = saved.profile || '';
   state.caregiver = saved.caregiver || 'Sharat';
 
+  // Check for stored API URL, prompt if missing
+  let apiUrl = localStorage.getItem('littlelog-api-url');
+  if (!apiUrl) {
+    apiUrl = prompt('Please enter your Google Apps Script Web App URL:');
+    if (apiUrl && apiUrl.trim()) {
+      localStorage.setItem('littlelog-api-url', apiUrl.trim());
+    } else {
+      showToast('Offline mode: No API URL provided', true);
+      await loadHome();
+      return;
+    }
+  }
+
   try {
     dbInstance = await openDatabase();
+    const bootstrap = await callApi('getBootstrap');
     
-    // Fetch bootstrap data from server to hydrate IndexedDB on first load
-    run('getBootstrap', [], async (bootstrap) => {
-      state.profiles = bootstrap.profiles.length ? bootstrap.profiles : ['Baby'];
-      state.caregivers = bootstrap.caregivers || ['Sharat', 'Marianne'];
+    state.profiles = bootstrap.profiles.length ? bootstrap.profiles : ['Baby'];
+    state.caregivers = bootstrap.caregivers || ['Sharat', 'Marianne'];
 
-      if (!state.profiles.includes(state.profile)) state.profile = state.profiles[0];
-      if (!state.caregivers.includes(state.caregiver)) state.caregiver = state.caregivers[0];
+    if (!state.profiles.includes(state.profile)) state.profile = state.profiles[0];
+    if (!state.caregivers.includes(state.caregiver)) state.caregiver = state.caregivers[0];
 
-      await syncBootstrapToIDB(bootstrap.allRows);
-      await loadHome();
-      setupBackgroundSync();
-    });
+    await syncBootstrapToIDB(bootstrap.allRows);
+    await loadHome();
+    setupBackgroundSync();
   } catch (err) {
     console.error('Initialization error:', err);
     showToast('Offline mode active', true);
@@ -127,19 +155,20 @@ async function triggerBackgroundSync() {
   const store = tx.objectStore('sync_queue');
   const req = store.getAll();
 
-  req.onsuccess = () => {
+  req.onsuccess = async () => {
     const queue = req.result;
     if (!queue || queue.length === 0) return;
 
-    google.script.run
-      .withSuccessHandler(() => {
-        // Clear sync queue items on success
-        const clearTx = dbInstance.transaction('sync_queue', 'readwrite');
-        const clearStore = clearTx.objectStore('sync_queue');
-        queue.forEach(item => clearStore.delete(item.id));
-      })
-      .withFailureHandler(err => console.warn('Background sync deferred:', err))
-      .batchSyncData(queue);
+    try {
+      await callApi('batchSync', { mutations: queue });
+      
+      // Clear sync queue items on success
+      const clearTx = dbInstance.transaction('sync_queue', 'readwrite');
+      const clearStore = clearTx.objectStore('sync_queue');
+      queue.forEach(item => clearStore.delete(item.id));
+    } catch (err) {
+      console.warn('Background sync deferred:', err);
+    }
   };
 }
 
