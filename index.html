@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="LittleLog">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#171b2a">
+  <title>LittleLog</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+  <link href="style.css" rel="stylesheet">
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="eyebrow">LITTLELOG</div>
+      <h1 id="profile-title">Loading…</h1>
+    </header>
+
+    <main id="home-page" class="page">
+      <section id="activity-cards"></section>
+      <section id="today-summary" class="today-summary"></section>
+    </main>
+
+    <main id="detail-page" class="page hidden"></main>
+
+    <nav class="bottom-nav">
+      <button class="active" onclick="showHome(this)">
+        <span>✦</span><small>Activity</small>
+      </button>
+      <button onclick="openDetail('Bottle Feed', this)">
+        <span>▣</span><small>History</small>
+      </button>
+      <button onclick="openSettings(this)">
+        <span>♡</span><small>Settings</small>
+      </button>
+    </nav>
+  </div>
+
+  <div id="overlay-root"></div>
+  <div id="loading" class="loading hidden">
+    <div class="spinner"></div>
+    <span>Loading…</span>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script>
+  <?!= include('JavaScript'); ?>
+</body>
+</html>
