@@ -1,4 +1,3 @@
-<style>
 :root {
   --bg: #171b2a;
   --panel: #292e3d;
@@ -224,9 +223,6 @@ h1 { margin: 0; font-size: 25px; }
   .activity-icon { font-size: 33px; }
   .editor-row label { font-size: 14px; }
 }
-</style>
-
-<style>
 /* V4 compact refinements */
 .card-header h2 { font-size: 22px; }
 .highlight-copy strong { font-size: 17px; }
@@ -244,4 +240,3 @@ h1 { margin: 0; font-size: 25px; }
 .multi-option { padding: 7px 9px; border: 1px solid var(--blue); border-radius: 9px; color: #8fb4df; background: transparent; font-size: 10px; font-weight: 700; }
 .multi-option.active { color: white; background: var(--blue); }
 .settings-section-label { padding: 12px 13px 2px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-</style>

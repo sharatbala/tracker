@@ -363,12 +363,12 @@ function renderDetail() {
   document.getElementById('detail-page').innerHTML = `
     <div class="detail-header" style="background:${typeConfig.color}">
       <button onclick="showHome()">← Back</button>
-      <h2>${typeConfig.icon} ${typeConfig.title} History</h2>
+      <h2>${typeConfig.icon} ${typeConfig.title}</h2>
       <button onclick="openEditor('${detail.type}')">+</button>
     </div>
     
     <div class="detail-sub-banner">
-      <strong>${escapeHtml(detail.headline)}</strong>
+      <div class="detail-headline"><strong>${escapeHtml(detail.headline)}</strong></div>
       <div class="detail-tabs">
         <button class="${state.detailTab === 'calendar' ? 'active' : ''}" onclick="switchDetailTab('calendar')">Calendar</button>
         <button class="${state.detailTab === 'list' ? 'active' : ''}" onclick="switchDetailTab('list')">List</button>
@@ -387,20 +387,20 @@ function switchDetailTab(tab) {
 
 function renderDetailCalendar(detail) {
   return `
-    <div class="calendar-buckets">
+    <div class="calendar-view">
       ${detail.buckets.slice().reverse().map(b => `
-        <div class="bucket-row">
-          <div class="bucket-date">
+        <div class="calendar-day-row">
+          <div class="calendar-day-meta">
             <strong>${formatDate(b.date)}</strong>
             <span>${b.total ? `${Math.round(b.total)}${detail.type === 'Bottle Feed' ? ' mL' : ''}` : '0'}</span>
           </div>
-          <div class="bucket-instances">
+          <div class="calendar-day-chips">
             ${b.instances.length ? b.instances.map(inst => `
-              <button class="instance-chip" onclick="openEditorByKey('${inst.key}')">
+              <button class="calendar-chip" onclick="openEditorByKey('${inst.key}')">
                 <small>${inst.start.slice(11, 16)}</small>
                 <span>${escapeHtml(inst.detail)}</span>
               </button>
-            `).join('') : '<span class="empty-instance">No entries</span>'}
+            `).join('') : '<span class="empty-chip-slot">—</span>'}
           </div>
         </div>
       `).join('')}
@@ -409,16 +409,18 @@ function renderDetailCalendar(detail) {
 
 function renderDetailList(detail) {
   return `
-    <div class="list-entries">
+    <div class="list-view">
       ${detail.entries.length ? detail.entries.map(entry => `
-        <button class="list-entry-row" onclick="openEditorByKey('${entry._activityKey}')">
-          <div>
+        <button class="list-row-item" onclick="openEditorByKey('${entry._activityKey}')">
+          <div class="list-row-left">
             <strong>${escapeHtml(entry['Start Date/time'])}</strong>
             <small>${escapeHtml(entry['Created By Caregiver'] || '')}</small>
           </div>
-          <span>${escapeHtml(entryDetail_(entry))}</span>
+          <div class="list-row-right">
+            <span>${escapeHtml(entryDetail_(entry))}</span>
+          </div>
         </button>
-      `).join('') : '<div class="empty-instance">No entries found for this range</div>'}
+      `).join('') : '<div class="empty-instance">No entries found</div>'}
     </div>`;
 }
 
@@ -439,15 +441,6 @@ async function saveEditorEntry(type, key, payload) {
   await upsertLocalEntry(payload, key ? 'update' : 'create');
   closeOverlay();
   showToast(key ? 'Updated' : 'Saved');
-  if (state.detail) loadDetail();
-  await loadHome();
-}
-
-async function deleteCurrent(key) {
-  if (!confirm('Delete this entry?')) return;
-  await deleteLocalEntry(key);
-  closeOverlay();
-  showToast('Deleted');
   if (state.detail) loadDetail();
   await loadHome();
 }
@@ -504,6 +497,140 @@ function showHome(navButton) {
   loadHome();
 }
 
+// --- Editor Overlay System ---
+function openEditor(type, existingEntry = null) {
+  const isEdit = !!existingEntry;
+  const config = TYPES[type] || { title: type, color: '#f2ecdc' };
+  const now = new Date();
+  
+  const startVal = existingEntry ? existingEntry['Start Date/time'].slice(0, 16) : formatDateTimeLocal_(now);
+  const key = existingEntry ? existingEntry._activityKey : '';
+
+  document.getElementById('overlay-root').innerHTML = `
+    <div class="editor-overlay">
+      <div class="editor">
+        <div class="editor-header" style="background:${config.color}">
+          <button onclick="closeOverlay()">×</button>
+          <h2>${isEdit ? 'Edit' : 'New'} ${config.title}</h2>
+          <button onclick="saveEditor('${type}', '${key}')">Save</button>
+        </div>
+        <div class="editor-body">
+          ${editorRow('Start Time', `<input id="edit-start" type="datetime-local" value="${startVal}">`)}
+          ${editorSpecificFields(type, existingEntry)}
+          ${isEdit ? `<button class="delete-button" onclick="deleteCurrent('${key}')">Delete Entry</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+function editorSpecificFields(type, e) {
+  if (type === 'Bottle Feed') {
+    const vol = e ? (e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || '') : '';
+    const unit = e ? (e['[Bottle Feed] Volume Unit'] || 'mL') : 'mL';
+    const feedType = e ? (e['[Bottle Feed] Type'] || 'Formula') : 'Formula';
+    return `
+      ${editorRow('Volume', `<input id="edit-volume" type="number" value="${vol}" placeholder="0">`)}
+      ${editorRow('Unit', segmentedChoices('feed-unit', ['mL', 'oz'], unit, 'chooseFeedUnit'))}
+      ${editorRow('Type', segmentedChoices('feed-type', ['Formula', 'Breast Milk', 'Mixed'], feedType, 'chooseFeedType'))}
+    `;
+  }
+  if (type === 'Diaper') {
+    const diaperType = e ? (e['[Diaper] Type'] || 'Wet') : 'Wet';
+    const detail = e ? (e['[Diaper] Detail'] || '') : '';
+    return `
+      ${editorRow('Type', segmentedChoices('diaper-type', ['Wet', 'Dirty', 'Both', 'Dry'], diaperType, 'chooseDiaperType'))}
+      ${editorRow('Note', `<input id="edit-diaper-detail" value="${escapeHtml(detail)}" placeholder="e.g. blowout, rash cream">`)}
+    `;
+  }
+  if (type === 'Sleep') {
+    const endVal = e && e['[Sleep] End Date/time'] ? e['[Sleep] End Date/time'].slice(0, 16) : '';
+    return `
+      ${editorRow('End Time', `<input id="edit-sleep-end" type="datetime-local" value="${endVal}">`)}
+    `;
+  }
+  if (type === 'Solid Feed') {
+    const meal = e ? (e['[Solid Feed] Meal'] || 'Breakfast') : 'Breakfast';
+    const food = e ? (e['[Solid Feed] Food'] || '') : '';
+    return `
+      ${editorRow('Meal', segmentedChoices('solid-meal', ['Breakfast', 'Lunch', 'Dinner', 'Snack'], meal, 'chooseSolidMeal'))}
+      ${editorRow('Food', `<input id="edit-solid-food" value="${escapeHtml(food)}" placeholder="e.g. mashed banana, oatmeal">`)}
+    `;
+  }
+  return '';
+}
+
+function editorRow(label, content) {
+  return `<div class="editor-row"><label>${label}</label><div>${content}</div></div>`;
+}
+
+function segmentedChoices(name, options, selected, callbackName) {
+  return `<div class="segmented" data-group="${name}">
+    ${options.map(opt => `<button type="button" class="${opt === selected ? 'active' : ''}" onclick="${callbackName}('${opt}', this)">${opt}</button>`).join('')}
+  </div>`;
+}
+
+// Segmented choice selection helpers
+function chooseFeedUnit(val, btn) { selectSegment(btn); }
+function chooseFeedType(val, btn) { selectSegment(btn); }
+function chooseDiaperType(val, btn) { selectSegment(btn); }
+function chooseSolidMeal(val, btn) { selectSegment(btn); }
+function selectSegment(btn) {
+  const group = btn.parentElement;
+  group.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function getSelectedSegment(groupName) {
+  const group = document.querySelector(`[data-group="${groupName}"]`);
+  const active = group?.querySelector('button.active');
+  return active ? active.textContent.trim() : '';
+}
+
+function saveFeedFields(payload) {
+  payload['[Bottle Feed] Volume'] = document.getElementById('edit-volume').value || '';
+  payload['[Bottle Feed] Volume Unit'] = getSelectedSegment('feed-unit');
+  payload['[Bottle Feed] Type'] = getSelectedSegment('feed-type');
+}
+
+function saveDiaperFields(payload) {
+  payload['[Diaper] Type'] = getSelectedSegment('diaper-type');
+  payload['[Diaper] Detail'] = document.getElementById('edit-diaper-detail').value || '';
+}
+
+function saveSleepFields(payload, startStr) {
+  const endStr = document.getElementById('edit-sleep-end').value;
+  if (endStr) {
+    const startEpoch = new Date(startStr).getTime();
+    const endEpoch = new Date(endStr).getTime();
+    payload['[Sleep] End Date/time'] = formatDateTimeString(new Date(endEpoch));
+    payload['[Sleep] End Date/time (Epoch)'] = endEpoch;
+    payload['[Sleep] Duration (Seconds)'] = Math.max(0, Math.floor((endEpoch - startEpoch) / 1000));
+  }
+}
+
+function saveSolidFields(payload) {
+  payload['[Solid Feed] Meal'] = getSelectedSegment('solid-meal');
+  payload['[Solid Feed] Food'] = document.getElementById('edit-solid-food').value || '';
+}
+
+function commonPayload(type, startStr) {
+  const startDate = new Date(startStr);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return {
+    Type: type,
+    'Profile Name': state.profile,
+    'Start Date/time': formatDateTimeString(startDate),
+    'Start Date/time (Epoch)': startDate.getTime(),
+    'Created By Caregiver': state.caregiver,
+    'Last Updated By Caregiver': state.caregiver,
+    'Time Zone': zone
+  };
+}
+
+function formatDateTimeLocal_(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+
 function openSettings(navButton) {
   activateNav(navButton || document.querySelectorAll('.bottom-nav button')[2]);
   document.getElementById('overlay-root').innerHTML = `
@@ -534,19 +661,59 @@ function saveSettings() {
 }
 
 // Form Submission Hook override
-function saveEditor(type, key) {
-  const start = document.getElementById('edit-start').value;
-  if (!start) return showToast('Please select a time.', true);
+async function saveEditor(type, key) {
+  const startStr = document.getElementById('edit-start').value;
+  if (!startStr) {
+    showToast('Start time is required', true);
+    return;
+  }
 
-  const payload = commonPayload(type, start);
-  if (key) payload._activityKey = key;
+  const payload = commonPayload(type, startStr);
 
   if (type === 'Bottle Feed') saveFeedFields(payload);
-  if (type === 'Diaper') saveDiaperFields(payload);
-  if (type === 'Sleep') saveSleepFields(payload, start);
-  if (type === 'Solid Feed') saveSolidFields(payload);
+  else if (type === 'Diaper') saveDiaperFields(payload);
+  else if (type === 'Sleep') saveSleepFields(payload, startStr);
+  else if (type === 'Solid Feed') saveSolidFields(payload);
 
-  saveEditorEntry(type, key, payload);
+  const action = key ? 'update' : 'create';
+  const activityKey = key || 'act_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+  payload._activityKey = activityKey;
+
+  try {
+    await queueMutation(action, activityKey, payload);
+    closeOverlay();
+    await loadHome();
+    showToast('Saved successfully');
+    triggerBackgroundSync();
+  } catch (err) {
+    console.error('Save failed:', err);
+    showToast('Failed to save entry', true);
+  }
+}
+async function deleteCurrent(key) {
+  if (!confirm('Are you sure you want to delete this entry?')) return;
+  try {
+    await queueMutation('delete', key, {});
+    closeOverlay();
+    await loadHome();
+    showToast('Deleted entry');
+    triggerBackgroundSync();
+  } catch (err) {
+    console.error('Delete failed:', err);
+    showToast('Failed to delete entry', true);
+  }
+}
+
+function openEditorByKey(key) {
+  // Find entry in local IDB cache or state and open editor
+  dbInstance.transaction('entries', 'readonly').objectStore('entries').get(key).onsuccess = (e) => {
+    const entry = e.target.result;
+    if (entry) {
+      openEditor(entry.Type || entry['Type'], entry);
+    } else {
+      showToast('Entry not found locally', true);
+    }
+  };
 }
 
 // Utility formatting calculations (copied from original codebase for client-side evaluation)
