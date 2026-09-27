@@ -16,7 +16,7 @@ async function initHistoryView() {
   if (!container) return;
 
   container.innerHTML = `
-    <div class="history-container" style="display: flex; flex-direction: column; gap: 16px; padding: 12px; max-width: 600px; margin: 0 auto; box-sizing: border-box;">
+    <div class="history-container" style="display: flex; flex-direction: column; gap: 16px; padding: 2px; max-width: 600px; margin: 0 auto; box-sizing: border-box;">
       
       <!-- Header Navigation -->
       <div class="calendar-header-wrapper" style="display: flex; align-items: center; justify-content: space-between; padding: 0 4px;">
@@ -34,7 +34,7 @@ async function initHistoryView() {
       </div>
 
       <!-- Timeline Card -->
-      <div class="weekly-grid-card" style="background: rgba(255, 255, 255, 0.03); border-radius: 12px; padding: 12px; border: 1px solid rgba(255,255,255,0.08); overflow: hidden;">
+      <div class="weekly-grid-card" style="overflow: hidden;">
         <div id="weekly-grid" style="position: relative; width: 100%; box-sizing: border-box;"></div>
       </div>
 
@@ -63,6 +63,34 @@ async function initHistoryView() {
   syncFilterChipsUI(); // Apply persistent active filters on view load
   renderWeeklyGrid();
   renderHistoryFeed();
+}
+
+// Open History Page prefiltered by activity type and date
+function openHistoryFiltered(type, targetDate) {
+  // Activate the History button in bottom nav
+  const historyNavBtn = document.querySelector('.bottom-nav button:nth-child(2)');
+  if (historyNavBtn) activateNav(historyNavBtn);
+
+  // Switch pages visibility
+  document.getElementById('home-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.add('hidden');
+  document.getElementById('history-page')?.classList.remove('hidden');
+
+  // Set history filters and selected date
+  if (typeof historyState !== 'undefined') {
+    historyState.activeFilters.clear();
+    const normalizedType = (type || '').toLowerCase().trim();
+    historyState.activeFilters.add(normalizedType);
+    
+    if (targetDate) {
+      historyState.selectedDate = targetDate;
+    }
+  }
+
+  // Initialize/render the history view
+  if (typeof initHistoryView === 'function') {
+    initHistoryView();
+  }
 }
 
 /**

@@ -47,46 +47,6 @@ async function loadHome() {
   startSleepClock(); 
 } //[cite: 1]
 
-async function loadDetail() { 
-  const entries = await getAllLocalEntries(); 
-  const profileEntries = entries 
-    .filter(e => e.Type && e._activityKey && (!state.profile || e['Profile Name'] === state.profile)) 
-    .sort((a, b) => Number(b['Start Date/time (Epoch)'] || 0) - Number(a['Start Date/time (Epoch)'] || 0));
-
-  const days = Number(state.days) || 7; 
-  const dates = dateRange_(state.endDate, days); 
-  const type = state.detailType;
-
-  const filtered = profileEntries.filter(entry => { 
-    if (entry.Type !== type && !(type === 'Sleep' && entry.Type === 'Sleep')) return false; 
-    const d = entryDate_(entry); 
-    return d >= dates[0] && d <= state.endDate; 
-  });
-
-  const buckets = dates.map(d => {
-    const dayEntries = filtered.filter(e => entryDate_(e) === d);
-    let total = 0;
-    const instances = dayEntries.map(e => {
-      const vol = Number(e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || 0);
-      total += vol;
-      return {
-        key: e._activityKey,
-        start: e['Start Date/time'] || '',
-        detail: entryDetail_(e)
-      };
-    });
-    return { date: d, total, instances };
-  });
-
-  state.detail = {
-    type,
-    headline: `${type} History`,
-    entries: filtered,
-    buckets
-  };
-
-  renderDetail();
-} //[cite: 1]
 
 function renderHome() { 
   const types = ['Bottle Feed', 'Diaper', 'Sleep', 'Solid Feed']; 
@@ -112,10 +72,38 @@ function renderCard(type) {
   const recent = state.home?.recent[config.key] || []; 
   if (type === 'Sleep' && state.home?.activeSleep) return renderActiveSleep(config, recent);
 
-  const latest = recent[0]; 
+  const latest = recent[0];
+  
+  // 2. Define targetDate properly (fallback to today if no entry exists)
+  const targetDate = latest ? entryDate_(latest) : localDate();
   const highlightAction = latest ? `openEditorByKey('${latest._activityKey}')` : `openEditor('${type}')`;
+  const cardId = `drawer-${type.toLowerCase().replace(/\s+/g, '-')}`;
 
-  return `
+  let maxVal = 1;
+  if (type === 'Bottle Feed') {
+    maxVal = Math.max(...recent.map(e => Number(e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || 0)), 1);
+  } else if (type === 'Sleep') {
+    maxVal = Math.max(...recent.map(e => Number(e['[Sleep] Duration (Seconds)'] || 0)), 1);
+  }
+
+  let topHighlightVal = '—';
+  if (latest) {
+    if (type === 'Sleep') {
+      const startStr = formatDrawerTime(latest);
+      const endEpoch = Number(latest['[Sleep] End Date/time (Epoch)'] || 0);
+      if (endEpoch) {
+        const endDate = new Date(endEpoch);
+        const endStr = endDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+        topHighlightVal = `${startStr} – ${endStr}`;
+      } else {
+        topHighlightVal = formatSleepDuration(Number(latest['[Sleep] Duration (Seconds)'] || 0));
+      }
+    } else {
+      topHighlightVal = latestValue(latest);
+    }
+  }
+
+  return ` 
     <article class="activity-card"> 
       <div class="card-header" style="background:${config.color}"> 
         <h2>${config.title}</h2><button class="add-button" onclick="openEditor('${type}')">+</button> 
@@ -126,14 +114,113 @@ function renderCard(type) {
           <strong>${latest ? latestLabel(type) : 'No entries yet'}</strong> 
           <small>${latest ? relativeTime(latest) : 'Tap to add one'}</small> 
         </span> 
-        <span class="highlight-value">${latest ? latestValue(latest) : '—'}</span> 
+        <span class="highlight-value">${topHighlightVal}</span> 
       </button> 
-      <div class="recent-panel"> 
-        ${recent.slice(1).map(compactEntry).join('') || '<div class="empty-compact">No earlier entries</div>'} 
-        <button class="see-all" onclick="openDetail('${type}')">See all ›</button> 
-      </div> 
+      ${recent.length > 0 ? `
+        <div class="card-drawer-toggle" onclick="toggleCardDrawer('${cardId}')" id="${cardId}-toggle">
+          <span id="${cardId}-toggle-text">Show More</span>
+          <span id="${cardId}-toggle-icon" style="transition: transform 0.2s ease;">▼</span>
+        </div>
+        <div class="card-drawer-content" id="${cardId}" style="max-height: 0; overflow: hidden; transition: max-height 0.3s ease;">
+          ${recent.map(entry => {
+            const hasBar = type === 'Bottle Feed' || type === 'Sleep';
+            let barWidthPx = 60;
+            
+            if (hasBar) {
+              const val = type === 'Bottle Feed'
+                ? Number(entry['[Bottle Feed] Volume'] || entry['[Bottle Feed] Formula Volume'] || 0)
+                : Number(entry['[Sleep] Duration (Seconds)'] || 0);
+              barWidthPx = Math.max(15, Math.round((val / maxVal) * 100));
+            }
+
+            // Build time label: for sleep, show start – end; for others, just start time
+            let timeLabel = formatDrawerTime(entry);
+            let detailText = escapeHtml(latestValue(entry));
+
+            if (type === 'Sleep') {
+              const endEpoch = Number(entry['[Sleep] End Date/time (Epoch)'] || 0);
+              if (endEpoch) {
+                const endDate = new Date(endEpoch);
+                const endStr = endDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+                const now = new Date();
+                const isYesterdayEnd = endDate.toDateString() === new Date(now.setDate(now.getDate() - 1)).toDateString();
+                // If it ends yesterday or spans days, keep it clean
+                timeLabel = `${timeLabel} – ${endStr}`;
+              }
+              const secs = Number(entry['[Sleep] Duration (Seconds)'] || 0);
+              detailText = formatSleepDuration(secs);
+            }
+
+            return `
+              <button class="drawer-item" onclick="openEditorByKey('${entry._activityKey}')">
+                <span class="activity-icon">${config.icon}</span>
+                <div class="drawer-item-copy">
+                  <strong>${timeLabel}</strong>
+                  <div class="drawer-row-details">
+                    ${hasBar ? `
+                      <div class="drawer-bar" style="background:${config.color}; width:${barWidthPx}px; height: 6px; border-radius: 3px; display: inline-block;"></div>
+                    ` : ''}
+                    <span class="drawer-text-detail">${detailText}</span>
+                  </div>
+                </div>
+                <span class="drawer-chevron">›</span>
+              </button>
+            `;
+          }).join('')}
+          <button class="see-all-drawer" onclick="openHistoryFiltered('${type}', '${targetDate}')">
+            <span>See all entries</span>
+            <span>›</span>
+          </button>
+        </div>
+      ` : ''}
     </article>`; 
-} //[cite: 1]
+}
+
+function formatDrawerTime(entry) {
+  const epoch = Number(entry['Start Date/time (Epoch)'] || 0);
+  if (!epoch) return formatTimeEntry(entry);
+  
+  const date = new Date(epoch);
+  const now = new Date();
+  const isYesterday = date.toDateString() === new Date(now.setDate(now.getDate() - 1)).toDateString();
+  
+  // Format cleanly as e.g. "9:14 am" or "yd 7:35 pm" without trailing colons
+  const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+  
+  if (isYesterday) {
+    return `yd ${timeStr}`;
+  }
+  return timeStr;
+}
+
+function formatSleepDuration(totalSeconds) {
+  if (!totalSeconds || totalSeconds <= 0) return '0m';
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.round((totalSeconds % 3600) / 60);
+  
+  if (hrs === 0) {
+    return `${mins}m`;
+  }
+  return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+}
+
+function toggleCardDrawer(cardId) {
+  const content = document.getElementById(cardId);
+  const toggleText = document.getElementById(`${cardId}-toggle-text`);
+  const toggleIcon = document.getElementById(`${cardId}-toggle-icon`);
+  if (!content) return;
+
+  const isOpen = content.style.maxHeight && content.style.maxHeight !== '0px';
+  if (isOpen) {
+    content.style.maxHeight = '0px';
+    if (toggleText) toggleText.textContent = 'Show More';
+    if (toggleIcon) toggleIcon.style.transform = 'rotate(0deg)';
+  } else {
+    content.style.maxHeight = content.scrollHeight + 'px';
+    if (toggleText) toggleText.textContent = 'Show Less';
+    if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
+  }
+}
 
 function compactEntry(entry) { 
   return `<button class="compact-entry" onclick="openEditorByKey('${entry._activityKey}')"><span>${formatTimeEntry(entry)}</span><strong>${escapeHtml(entryDetail(entry))}</strong></button>`; 
@@ -152,7 +239,7 @@ function renderActiveSleep(config, recent) {
       <button class="sleep-stop" onclick="endActiveSleep()">End Sleep</button> 
       <div class="recent-panel"> 
         ${recent.filter(e => e._activityKey !== active._activityKey).slice(0, 2).map(compactEntry).join('')} 
-        <button class="see-all" onclick="openDetail('Sleep')">See all ›</button> 
+        <button class="see-all" onclick="openHistoryFiltered('Sleep', '${active ? entryDate_(active) : localDate()}')">See all ›</button> 
       </div> 
     </article>`; 
 } //[cite: 1]
@@ -185,70 +272,3 @@ async function endActiveSleep() {
   await loadHome();
 } //[cite: 1]
 
-function renderDetail() { 
-  const detail = state.detail; 
-  if (!detail) return;
-
-  const typeConfig = TYPES[detail.type] || { title: detail.type, icon: '📋', color: '#f2ecdc' };
-
-  document.getElementById('detail-page').innerHTML = ` 
-    <div class="detail-header" style="background:${typeConfig.color}"> 
-      <button onclick="showHome()">← Back</button> 
-      <h2>${typeConfig.icon} ${typeConfig.title}</h2> 
-      <button onclick="openEditor('${detail.type}')">+</button> 
-    </div> 
-    <div class="detail-sub-banner">
-      <div class="detail-headline"><strong>${escapeHtml(detail.headline)}</strong></div>
-      <div class="detail-tabs">
-        <button class="${state.detailTab === 'calendar' ? 'active' : ''}" onclick="switchDetailTab('calendar')">Calendar</button>
-        <button class="${state.detailTab === 'list' ? 'active' : ''}" onclick="switchDetailTab('list')">List</button>
-      </div>
-    </div>
-    <div class="detail-content">
-      ${state.detailTab === 'calendar' ? renderDetailCalendar(detail) : renderDetailList(detail)}
-    </div>`; 
-} //[cite: 1]
-
-function switchDetailTab(tab) { 
-  state.detailTab = tab; 
-  renderDetail(); 
-} //[cite: 1]
-
-function renderDetailCalendar(detail) { 
-  return `
-    <div class="calendar-view"> 
-      ${detail.buckets.slice().reverse().map(b => `
-        <div class="calendar-day-row"> 
-          <div class="calendar-day-meta"> 
-            <strong>${formatDate(b.date)}</strong> 
-            <span>${b.total ? Math.round(b.total) : '0'}${detail.type === 'Bottle Feed' ? ' mL' : ''}</span> 
-          </div> 
-          <div class="calendar-day-chips"> 
-            ${b.instances.length ? b.instances.map(inst => `
-              <button class="calendar-chip" onclick="openEditorByKey('${inst.key}')"> 
-                <small>${inst.start.slice(11, 16)}</small> 
-                <span>${escapeHtml(inst.detail)}</span> 
-              </button> 
-            `).join('') : '<span class="empty-chip-slot">—</span>'} 
-          </div> 
-        </div> 
-      `).join('')} 
-    </div>`; 
-} //[cite: 1]
-
-function renderDetailList(detail) { 
-  return `
-    <div class="list-view"> 
-      ${detail.entries.length ? detail.entries.map(entry => `
-        <button class="list-row-item" onclick="openEditorByKey('${entry._activityKey}')"> 
-          <div class="list-row-left"> 
-            <strong>${escapeHtml(entry['Start Date/time'] || '')}</strong> 
-            <small>${escapeHtml(entry['Created By Caregiver'] || '')}</small> 
-          </div> 
-          <div class="list-row-right"> 
-            <span>${escapeHtml(entryDetail_(entry))}</span> 
-          </div> 
-        </button> 
-      `).join('') : '<div class="empty-instance">No entries found</div>'} 
-    </div>`; 
-} //[cite: 1]

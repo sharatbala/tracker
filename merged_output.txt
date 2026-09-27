@@ -1,0 +1,4162 @@
+==> ./LICENSE <==
+MIT License
+
+Copyright (c) 2026 sharatbala
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==> ./sw.js <==
+// sw.js
+const CACHE_NAME = 'littlelog-v1';
+const ASSETS = [
+  '/',
+  '/index.html',
+  '/manifest.json',
+  '/icon-192.png',
+  '/icon-512.png'
+];
+
+// Install the service worker and cache assets
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS);
+    })
+  );
+});
+
+// Required by Android Chrome to trigger the install prompt
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request).then((cachedResponse) => {
+      return cachedResponse || fetch(event.request);
+    })
+  );
+});
+
+
+==> ./README.md <==
+# tracker
+Baby activity and feed tracker
+
+==> ./manifest.json <==
+{
+  "name": "LittleLog",
+  "short_name": "LittleLog",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "background_color": "#171b2a",
+  "theme_color": "#171b2a",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
+
+
+==> ./js/views.js <==
+async function loadHome() { 
+  clearInterval(state.sleepTimer); 
+  const titleEl = document.getElementById('profile-title');
+  if (titleEl) titleEl.textContent = state.profile;
+
+  const entries = await getAllLocalEntries(); 
+  const profileEntries = entries 
+    .filter(e => e.Type && e._activityKey && (!state.profile || e['Profile Name'] === state.profile)) 
+    .sort((a, b) => Number(b['Start Date/time (Epoch)'] || 0) - Number(a['Start Date/time (Epoch)'] || 0));
+
+  const todayStr = localDate(); 
+  const recent = type => profileEntries.filter(e => e.Type === type).slice(0, 3); 
+  const todayEntries = profileEntries.filter(e => entryDate_(e) === todayStr); 
+  const activeSleep = profileEntries.find(e => e.Type === 'Sleep' && !e['[Sleep] End Date/time (Epoch)']) || null;
+
+  let sleepSecs = 0;
+  let feedCount = 0;
+  let feedMl = 0;
+  let diaperCount = 0;
+  let solidsCount = 0;
+
+  todayEntries.forEach(e => {
+    if (e.Type === 'Bottle Feed') {
+      feedCount++;
+      feedMl += Number(e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || 0);
+    } else if (e.Type === 'Diaper') {
+      diaperCount++;
+    } else if (e.Type === 'Solid Feed') {
+      solidsCount++;
+    } else if (e.Type === 'Sleep' && e['[Sleep] Duration (Seconds)']) {
+      sleepSecs += Number(e['[Sleep] Duration (Seconds)']);
+    }
+  });
+
+  state.home = {
+    recent: {
+      feed: recent('Bottle Feed'),
+      diaper: recent('Diaper'),
+      sleep: recent('Sleep'),
+      solids: recent('Solid Feed')
+    },
+    today: { sleepSeconds: sleepSecs, feedCount, feedMl, diaperCount, solidsCount },
+    activeSleep
+  };
+
+  renderHome(); 
+  startSleepClock(); 
+} //[cite: 1]
+
+
+function renderHome() { 
+  const types = ['Bottle Feed', 'Diaper', 'Sleep', 'Solid Feed']; 
+  const cardsContainer = document.getElementById('activity-cards');
+  if (cardsContainer) cardsContainer.innerHTML = types.map(renderCard).join(''); 
+  
+  const today = state.home?.today || { sleepSeconds: 0, feedCount: 0, feedMl: 0, diaperCount: 0, solidsCount: 0 }; 
+  const summaryContainer = document.getElementById('today-summary');
+  if (summaryContainer) {
+    summaryContainer.innerHTML = `
+      <div class="section-heading"><h2>Today</h2><span>${formatDate(localDate())}</span></div> 
+      <div class="summary-grid"> 
+        <div><strong>${duration(today.sleepSeconds)}</strong><span>Sleep</span></div> 
+        <div><strong>${today.feedCount}</strong><span>Feeds • ${today.feedMl} mL</span></div> 
+        <div><strong>${today.diaperCount}</strong><span>Diapers</span></div> 
+        <div><strong>${today.solidsCount}</strong><span>Meals</span></div> 
+      </div>`; 
+  }
+} //[cite: 1]
+
+function renderCard(type) { 
+  const config = TYPES[type]; 
+  const recent = state.home?.recent[config.key] || []; 
+  if (type === 'Sleep' && state.home?.activeSleep) return renderActiveSleep(config, recent);
+
+  const latest = recent[0];
+  
+  // 2. Define targetDate properly (fallback to today if no entry exists)
+  const targetDate = latest ? entryDate_(latest) : localDate();
+  const highlightAction = latest ? `openEditorByKey('${latest._activityKey}')` : `openEditor('${type}')`;
+  const cardId = `drawer-${type.toLowerCase().replace(/\s+/g, '-')}`;
+
+  let maxVal = 1;
+  if (type === 'Bottle Feed') {
+    maxVal = Math.max(...recent.map(e => Number(e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || 0)), 1);
+  } else if (type === 'Sleep') {
+    maxVal = Math.max(...recent.map(e => Number(e['[Sleep] Duration (Seconds)'] || 0)), 1);
+  }
+
+  let topHighlightVal = '—';
+  if (latest) {
+    if (type === 'Sleep') {
+      const startStr = formatDrawerTime(latest);
+      const endEpoch = Number(latest['[Sleep] End Date/time (Epoch)'] || 0);
+      if (endEpoch) {
+        const endDate = new Date(endEpoch);
+        const endStr = endDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+        topHighlightVal = `${startStr} – ${endStr}`;
+      } else {
+        topHighlightVal = formatSleepDuration(Number(latest['[Sleep] Duration (Seconds)'] || 0));
+      }
+    } else {
+      topHighlightVal = latestValue(latest);
+    }
+  }
+
+  return ` 
+    <article class="activity-card"> 
+      <div class="card-header" style="background:${config.color}"> 
+        <h2>${config.title}</h2><button class="add-button" onclick="openEditor('${type}')">+</button> 
+      </div> 
+      <button class="card-highlight" onclick="${highlightAction}"> 
+        <span class="activity-icon">${config.icon}</span> 
+        <span class="highlight-copy"> 
+          <strong>${latest ? latestLabel(type) : 'No entries yet'}</strong> 
+          <small>${latest ? relativeTime(latest) : 'Tap to add one'}</small> 
+        </span> 
+        <span class="highlight-value">${topHighlightVal}</span> 
+      </button> 
+      ${recent.length > 0 ? `
+        <div class="card-drawer-toggle" onclick="toggleCardDrawer('${cardId}')" id="${cardId}-toggle">
+          <span id="${cardId}-toggle-text">Show More</span>
+          <span id="${cardId}-toggle-icon" style="transition: transform 0.2s ease;">▼</span>
+        </div>
+        <div class="card-drawer-content" id="${cardId}" style="max-height: 0; overflow: hidden; transition: max-height 0.3s ease;">
+          ${recent.map(entry => {
+            const hasBar = type === 'Bottle Feed' || type === 'Sleep';
+            let barWidthPx = 60;
+            
+            if (hasBar) {
+              const val = type === 'Bottle Feed'
+                ? Number(entry['[Bottle Feed] Volume'] || entry['[Bottle Feed] Formula Volume'] || 0)
+                : Number(entry['[Sleep] Duration (Seconds)'] || 0);
+              barWidthPx = Math.max(15, Math.round((val / maxVal) * 100));
+            }
+
+            // Build time label: for sleep, show start – end; for others, just start time
+            let timeLabel = formatDrawerTime(entry);
+            let detailText = escapeHtml(latestValue(entry));
+
+            if (type === 'Sleep') {
+              const endEpoch = Number(entry['[Sleep] End Date/time (Epoch)'] || 0);
+              if (endEpoch) {
+                const endDate = new Date(endEpoch);
+                const endStr = endDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+                const now = new Date();
+                const isYesterdayEnd = endDate.toDateString() === new Date(now.setDate(now.getDate() - 1)).toDateString();
+                // If it ends yesterday or spans days, keep it clean
+                timeLabel = `${timeLabel} – ${endStr}`;
+              }
+              const secs = Number(entry['[Sleep] Duration (Seconds)'] || 0);
+              detailText = formatSleepDuration(secs);
+            }
+
+            return `
+              <button class="drawer-item" onclick="openEditorByKey('${entry._activityKey}')">
+                <span class="activity-icon">${config.icon}</span>
+                <div class="drawer-item-copy">
+                  <strong>${timeLabel}</strong>
+                  <div class="drawer-row-details">
+                    ${hasBar ? `
+                      <div class="drawer-bar" style="background:${config.color}; width:${barWidthPx}px; height: 6px; border-radius: 3px; display: inline-block;"></div>
+                    ` : ''}
+                    <span class="drawer-text-detail">${detailText}</span>
+                  </div>
+                </div>
+                <span class="drawer-chevron">›</span>
+              </button>
+            `;
+          }).join('')}
+          <button class="see-all-drawer" onclick="openHistoryFiltered('${type}', '${targetDate}')">
+            <span>See all entries</span>
+            <span>›</span>
+          </button>
+        </div>
+      ` : ''}
+    </article>`; 
+}
+
+function formatDrawerTime(entry) {
+  const epoch = Number(entry['Start Date/time (Epoch)'] || 0);
+  if (!epoch) return formatTimeEntry(entry);
+  
+  const date = new Date(epoch);
+  const now = new Date();
+  const isYesterday = date.toDateString() === new Date(now.setDate(now.getDate() - 1)).toDateString();
+  
+  // Format cleanly as e.g. "9:14 am" or "yd 7:35 pm" without trailing colons
+  const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+  
+  if (isYesterday) {
+    return `yd ${timeStr}`;
+  }
+  return timeStr;
+}
+
+function formatSleepDuration(totalSeconds) {
+  if (!totalSeconds || totalSeconds <= 0) return '0m';
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.round((totalSeconds % 3600) / 60);
+  
+  if (hrs === 0) {
+    return `${mins}m`;
+  }
+  return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+}
+
+function toggleCardDrawer(cardId) {
+  const content = document.getElementById(cardId);
+  const toggleText = document.getElementById(`${cardId}-toggle-text`);
+  const toggleIcon = document.getElementById(`${cardId}-toggle-icon`);
+  if (!content) return;
+
+  const isOpen = content.style.maxHeight && content.style.maxHeight !== '0px';
+  if (isOpen) {
+    content.style.maxHeight = '0px';
+    if (toggleText) toggleText.textContent = 'Show More';
+    if (toggleIcon) toggleIcon.style.transform = 'rotate(0deg)';
+  } else {
+    content.style.maxHeight = content.scrollHeight + 'px';
+    if (toggleText) toggleText.textContent = 'Show Less';
+    if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
+  }
+}
+
+function compactEntry(entry) { 
+  return `<button class="compact-entry" onclick="openEditorByKey('${entry._activityKey}')"><span>${formatTimeEntry(entry)}</span><strong>${escapeHtml(entryDetail(entry))}</strong></button>`; 
+} //[cite: 1]
+
+function renderActiveSleep(config, recent) { 
+  const active = state.home.activeSleep; 
+  return `
+    <article class="activity-card"> 
+      <div class="card-header" style="background:${config.color}"><h2>Sleep</h2><span class="live-badge">LIVE</span></div> 
+      <div class="active-sleep"> 
+        <span class="activity-icon">🌙</span> 
+        <div><strong>Sleeping</strong><small>Started ${formatTimeEntry(active)}</small></div> 
+        <b id="sleep-clock">00:00:00</b> 
+      </div> 
+      <button class="sleep-stop" onclick="endActiveSleep()">End Sleep</button> 
+      <div class="recent-panel"> 
+        ${recent.filter(e => e._activityKey !== active._activityKey).slice(0, 2).map(compactEntry).join('')} 
+        <button class="see-all" onclick="openHistoryFiltered('Sleep', '${active ? entryDate_(active) : localDate()}')">See all ›</button> 
+      </div> 
+    </article>`; 
+} //[cite: 1]
+
+function startSleepClock() {
+  if (!state.home?.activeSleep) return;
+  const startEpoch = Number(state.home.activeSleep['Start Date/time (Epoch)'] || Date.now());
+  
+  state.sleepTimer = setInterval(() => {
+    const clockEl = document.getElementById('sleep-clock');
+    if (!clockEl) return;
+    const diffSecs = Math.floor((Date.now() - startEpoch) / 1000);
+    const hrs = String(Math.floor(diffSecs / 3600)).padStart(2, '0');
+    const mins = String(Math.floor((diffSecs % 3600) / 60)).padStart(2, '0');
+    const secs = String(diffSecs % 60).padStart(2, '0');
+    clockEl.textContent = `${hrs}:${mins}:${secs}`;
+  }, 1000);
+} //[cite: 1]
+
+async function endActiveSleep() {
+  if (!state.home?.activeSleep) return;
+  const active = state.home.activeSleep;
+  const now = new Date();
+  active['[Sleep] End Date/time'] = formatDateTimeLocal_(now);
+  active['[Sleep] End Date/time (Epoch)'] = now.getTime();
+  const startEpoch = Number(active['Start Date/time (Epoch)'] || now.getTime());
+  active['[Sleep] Duration (Seconds)'] = Math.floor((now.getTime() - startEpoch) / 1000);
+  
+  await upsertLocalEntry(active, 'update');
+  await loadHome();
+} //[cite: 1]
+
+
+==> ./js/editor.js <==
+/**
+ * js/editor.js - Editor Overlays and Bottom Sheets
+ */
+
+function openEditor(type, existingEntry = null) { 
+  const isEdit = !!existingEntry; 
+  const config = (typeof TYPES !== 'undefined' && TYPES[type]) ? TYPES[type] : { title: type, color: '#f1c550' }; 
+  const now = new Date();
+
+  const startVal = existingEntry ? (existingEntry['Start Date/time'] || '').slice(0, 16) : formatDateTimeLocal_(now); 
+  const key = existingEntry ? existingEntry._activityKey : '';
+
+  let overlay = document.getElementById('overlay-root');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'overlay-root';
+    document.body.appendChild(overlay);
+  }
+
+  // If opening Feed for a NEW entry, show the Feed Type Selector bottom sheet first
+  if (!isEdit && (type === 'Bottle Feed' || type === 'Feed')) {
+    overlay.innerHTML = `
+      <div class="editor-overlay" onclick="if(event.target===this) closeOverlay()">
+        <div class="editor feed-picker-sheet">
+          <div class="sheet-handle"></div>
+          <div class="picker-options">
+            <button type="button" class="picker-option" onclick="renderEditorForm('Bottle Feed', null, '${startVal}', '')">
+              <span class="picker-icon">🍼</span>
+              <span class="picker-label">Bottle Feed</span>
+            </button>
+            <button type="button" class="picker-option" onclick="renderEditorForm('Solid Feed', null, '${startVal}', '')">
+              <span class="picker-icon">🥣</span>
+              <span class="picker-label">Solids</span>
+            </button>
+            <button type="button" class="picker-option" onclick="renderEditorForm('Combo Feed', null, '${startVal}', '')">
+              <span class="picker-icon">🤱🍼</span>
+              <span class="picker-label">Combo Feed</span>
+            </button>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  renderEditorForm(type, existingEntry, startVal, key);
+}
+
+function renderEditorForm(type, existingEntry, startVal, key) {
+  const isEdit = !!existingEntry;
+  const config = (typeof TYPES !== 'undefined' && TYPES[type]) ? TYPES[type] : { title: type, color: '#f1c550' };
+  
+  let overlay = document.getElementById('overlay-root');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'overlay-root';
+    document.body.appendChild(overlay);
+  }
+
+  overlay.innerHTML = `
+    <div class="editor-overlay" onclick="if(event.target===this) closeOverlay()"> 
+      <div class="editor"> 
+        <div class="sheet-handle"></div>
+        <div class="editor-header" style="background:${config.color}"> 
+          <button type="button" class="close-btn" onclick="closeOverlay()">✕</button> 
+          <h2>${isEdit ? 'Edit' : 'New'} ${config.title}</h2> 
+          <button type="button" class="save-btn" onclick="saveEditor('${type}', '${key}')">Save</button> 
+        </div> 
+        <div class="editor-body"> 
+          ${editorRow('Start Time', `<input id="edit-start" type="datetime-local" value="${startVal}">`)} 
+          ${editorSpecificFields(type, existingEntry)} 
+          ${isEdit ? `<button type="button" class="delete-button" onclick="deleteCurrent('${key}')">Delete Entry</button>` : ''} 
+        </div> 
+      </div> 
+    </div>`; 
+
+  overlay.classList.add('active');
+} 
+
+async function openEditorByKey(key) { 
+  const entries = await getAllLocalEntries(); 
+  const entry = entries.find(e => e._activityKey === key); 
+  if (entry) openEditor(entry.Type, entry); 
+} 
+
+function editorSpecificFields(type, e) { 
+  if (type === 'Bottle Feed') { 
+    const vol = e ? (e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || '') : ''; 
+    const unit = e ? (e['[Bottle Feed] Volume Unit'] || 'mL') : 'mL'; 
+    const feedType = e ? (e['[Bottle Feed] Type'] || 'Formula') : 'Formula'; 
+    return `
+      ${editorRow('Volume', `<input id="edit-volume" type="number" value="${vol}" placeholder="0">`)} 
+      ${editorRow('Unit', segmentedChoices('feed-unit', ['mL', 'oz'], unit, 'chooseFeedUnit'))} 
+      ${editorRow('Type', segmentedChoices('feed-type', ['Formula', 'Breast Milk', 'Mixed'], feedType, 'chooseFeedType'))}
+    `; 
+  } 
+  if (type === 'Diaper') { 
+    const diaperType = e ? (e['[Diaper] Type'] || 'Wet') : 'Wet'; 
+    const detail = e ? (e['[Diaper] Detail'] || '') : ''; 
+    return `
+      ${editorRow('Type', segmentedChoices('diaper-type', ['Wet', 'Dirty', 'Both', 'Dry'], diaperType, 'chooseDiaperType'))} 
+      ${editorRow('Note', `<input id="edit-diaper-detail" value="${escapeHtml(detail)}" placeholder="e.g. blowout, rash cream">`)}
+    `; 
+  } 
+  if (type === 'Sleep') { 
+    const endVal = e && e['[Sleep] End Date/time'] ? e['[Sleep] End Date/time'].slice(0, 16) : ''; 
+    return `
+      ${editorRow('End Time', `<input id="edit-sleep-end" type="datetime-local" value="${endVal}">`)}
+    `; 
+  } 
+  if (type === 'Solid Feed') { 
+    const meal = e ? (e['[Solid Feed] Meal'] || 'Breakfast') : 'Breakfast'; 
+    const food = e ? (e['[Solid Feed] Food'] || '') : ''; 
+    return `
+      ${editorRow('Meal', segmentedChoices('solid-meal', ['Breakfast', 'Lunch', 'Dinner', 'Snack'], meal, 'chooseSolidMeal'))} 
+      ${editorRow('Food', `<input id="edit-solid-food" value="${escapeHtml(food)}" placeholder="e.g. mashed banana, oatmeal">`)}
+    `; 
+  } 
+  return ''; 
+} 
+
+function editorRow(label, content) { 
+  return `<div class="editor-row"><label>${label}</label><div>${content}</div></div>`; 
+} 
+
+function segmentedChoices(name, options, selected, callbackName) { 
+  return `
+    <div class="segmented" data-group="${name}"> 
+      ${options.map(opt => `<button type="button" class="${opt === selected ? 'active' : ''}" onclick="${callbackName}('${opt}', this)">${opt}</button>`).join('')}
+    </div>`; 
+} 
+
+function chooseFeedUnit(val, btn) { selectSegment(btn); } 
+function chooseFeedType(val, btn) { selectSegment(btn); } 
+function chooseDiaperType(val, btn) { selectSegment(btn); } 
+function chooseSolidMeal(val, btn) { selectSegment(btn); } 
+function chooseCaregiver(val, btn) { selectSegment(btn); } 
+
+function selectSegment(btn) { 
+  const group = btn.parentElement; 
+  group.querySelectorAll('button').forEach(b => b.classList.remove('active')); 
+  btn.classList.add('active'); 
+} 
+
+function getSelectedSegment(groupName) { 
+  const group = document.querySelector(`[data-group="${groupName}"]`); 
+  const active = group?.querySelector('button.active'); 
+  return active ? active.textContent.trim() : ''; 
+} 
+
+function saveFeedFields(payload) { 
+  payload['[Bottle Feed] Volume'] = document.getElementById('edit-volume')?.value || ''; 
+  payload['[Bottle Feed] Volume Unit'] = getSelectedSegment('feed-unit'); 
+  payload['[Bottle Feed] Type'] = getSelectedSegment('feed-type'); 
+} 
+
+function saveDiaperFields(payload) { 
+  payload['[Diaper] Type'] = getSelectedSegment('diaper-type'); 
+  payload['[Diaper] Detail'] = document.getElementById('edit-diaper-detail')?.value || ''; 
+} 
+
+function saveSleepFields(payload) {
+  const endStr = document.getElementById('edit-sleep-end')?.value || '';
+  payload['[Sleep] End Date/time'] = endStr;
+  if (endStr) {
+    const endEpoch = new Date(endStr).getTime();
+    const startEpoch = Number(payload['Start Date/time (Epoch)'] || Date.now());
+    payload['[Sleep] End Date/time (Epoch)'] = endEpoch;
+    payload['[Sleep] Duration (Seconds)'] = Math.floor((endEpoch - startEpoch) / 1000);
+  }
+} 
+
+function saveSolidFields(payload) {
+  payload['[Solid Feed] Meal'] = getSelectedSegment('solid-meal');
+  payload['[Solid Feed] Food'] = document.getElementById('edit-solid-food')?.value || '';
+} 
+
+async function saveEditor(type, key) { 
+  const startStr = document.getElementById('edit-start')?.value; 
+  if (!startStr) { 
+    showToast('Start time is required', true); 
+    return; 
+  }
+
+  const entries = await getAllLocalEntries();
+  const existing = entries.find(e => e._activityKey === key) || {};
+  const startDate = new Date(startStr);
+
+  const payload = {
+    ...existing,
+    Type: type,
+    'Profile Name': state.profile,
+    'Created By Caregiver': state.caregiver,
+    'Start Date/time': startStr,
+    'Start Date/time (Epoch)': startDate.getTime()
+  };
+
+  if (type === 'Bottle Feed') saveFeedFields(payload);
+  else if (type === 'Diaper') saveDiaperFields(payload);
+  else if (type === 'Sleep') saveSleepFields(payload);
+  else if (type === 'Solid Feed') saveSolidFields(payload);
+
+  await saveEditorEntry(type, key, payload);
+} 
+
+async function saveEditorEntry(type, key, payload) { 
+  if (!payload._activityKey) { 
+    payload._activityKey = 't-' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15); 
+  } 
+  await upsertLocalEntry(payload, key ? 'update' : 'create'); 
+  closeOverlay(); 
+  showToast(key ? 'Updated' : 'Saved'); 
+  if (state.detail) loadDetail(); 
+  await loadHome(); 
+} 
+
+async function deleteCurrent(key) {
+  if (!key) return;
+  if (confirm('Are you sure you want to delete this entry?')) {
+    await deleteLocalEntry(key);
+    closeOverlay();
+    showToast('Deleted');
+    if (state.detail) loadDetail();
+    await loadHome();
+  }
+} 
+
+function closeOverlay() { 
+  const overlay = document.getElementById('overlay-root'); 
+  if (overlay) { 
+    overlay.innerHTML = ''; 
+    overlay.classList.remove('active');
+  } 
+} 
+
+function formatDateTimeLocal_(d) { 
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); 
+}
+
+==> ./js/app.js <==
+/**
+ * app.js - Main Application Entry & Page Navigation Router
+ */
+
+async function initialize() { 
+  const saved = JSON.parse(localStorage.getItem('littlelog-settings') || '{}'); 
+  
+  // Fully data-driven: no hardcoded personal or family name defaults
+  state.profile = saved.profile || ''; 
+  state.caregiver = saved.caregiver || '';
+  state.caregivers = saved.caregivers || [];
+  state.profiles = saved.profiles || [];
+
+  let apiUrl = localStorage.getItem('littlelog-api-url'); 
+  if (!apiUrl) { 
+    apiUrl = prompt('Please enter your Google Apps Script Web App URL:'); 
+    if (apiUrl && apiUrl.trim()) { 
+      localStorage.setItem('littlelog-api-url', apiUrl.trim()); 
+    } else { 
+      showToast('Offline mode: No API URL provided', true); 
+    } 
+  }
+
+  try { 
+    // 1. Open database
+    dbInstance = await openDatabase(); 
+    
+    // 2. Render UI immediately
+    await loadHome();
+
+    // 3. Sync background
+    if (apiUrl) {
+      syncInBackground();
+    } else {
+      updateSyncBadge('offline', 'Offline');
+    }
+  } catch (err) { 
+    console.error('Initialization error:', err); 
+    showToast('Offline mode active', true); 
+    updateSyncBadge('offline', 'Offline');
+    await loadHome(); 
+  } 
+}
+
+// Background sync function
+async function syncInBackground() {
+  updateSyncBadge('syncing', 'Syncing...');
+
+  try {
+    const bootstrap = await callApi('getBootstrap');
+
+    if (bootstrap) {
+      state.profiles = bootstrap.profiles?.length ? bootstrap.profiles : (state.profile ? [state.profile] : []);
+      state.caregivers = bootstrap.caregivers?.length ? bootstrap.caregivers : (state.caregiver ? [state.caregiver] : []);
+
+      // Set valid profile/caregiver dynamically from data if not already set
+      if (!state.profile && state.profiles.length > 0) {
+        state.profile = state.profiles[0];
+      }
+      if (!state.caregiver && state.caregivers.length > 0) {
+        state.caregiver = state.caregivers[0];
+      }
+
+      if (bootstrap.allRows) {
+        await syncBootstrapToIDB(bootstrap.allRows);
+        await loadHome(); // Re-render view with downloaded data
+      }
+    }
+    
+    updateSyncBadge('synced', 'Synced');
+    setupBackgroundSync();
+  } catch (err) {
+    console.warn('Background sync failed:', err);
+    updateSyncBadge('offline', 'Offline');
+  }
+}
+
+// Helper to update sync badge text and status
+function updateSyncBadge(statusClass, labelText) {
+  const badge = document.getElementById('sync-status');
+  const textEl = document.getElementById('sync-text');
+
+  if (badge) {
+    badge.className = `sync-badge ${statusClass}`;
+  }
+  if (textEl) {
+    textEl.textContent = labelText;
+  }
+}
+
+// Open Detail Page View
+function openDetail(type, navButton) { 
+  state.detailType = type; 
+  state.selectedDate = state.endDate; 
+  if (navButton) activateNav(navButton); 
+
+  document.getElementById('home-page')?.classList.add('hidden'); 
+  document.getElementById('history-page')?.classList.add('hidden'); 
+  document.getElementById('settings-page')?.classList.add('hidden'); 
+  document.getElementById('detail-page')?.classList.remove('hidden'); 
+  document.getElementById('trends-page')?.classList.add('hidden');
+  loadDetail(); 
+} 
+
+// Switch to History/Timeline Page View
+function showHistoryPage(navButton) {
+  if (navButton) activateNav(navButton);
+  
+  document.getElementById('home-page')?.classList.add('hidden');
+  document.getElementById('detail-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.add('hidden');
+  document.getElementById('trends-page')?.classList.add('hidden');
+  document.getElementById('history-page')?.classList.remove('hidden');
+
+  if (typeof initHistoryView === 'function') {
+    initHistoryView();
+  }
+}
+
+// Switch to Settings Page View (Single streamlined handler)
+function showSettingsPage(navButton) {
+  if (navButton) activateNav(navButton);
+
+  document.getElementById('home-page')?.classList.add('hidden');
+  document.getElementById('detail-page')?.classList.add('hidden');
+  document.getElementById('history-page')?.classList.add('hidden');
+  document.getElementById('trends-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.remove('hidden');
+
+  if (typeof initSettingsView === 'function') {
+    initSettingsView();
+  }
+}
+
+// Switch to Home Page View
+function showHome(navButton) { 
+  document.getElementById('history-page')?.classList.add('hidden'); 
+  document.getElementById('detail-page')?.classList.add('hidden'); 
+  document.getElementById('settings-page')?.classList.add('hidden'); 
+  document.getElementById('home-page')?.classList.remove('hidden'); 
+  document.getElementById('trends-page')?.classList.add('hidden');
+  
+  if (navButton) activateNav(navButton); 
+  state.detail = null; 
+  loadHome(); 
+}
+
+function showTrendsPage(navButton) {
+  if (navButton) activateNav(navButton);
+  
+  document.getElementById('home-page')?.classList.add('hidden');
+  document.getElementById('detail-page')?.classList.add('hidden');
+  document.getElementById('history-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.add('hidden');
+  
+  let trendsPage = document.getElementById('trends-page');
+  if (!trendsPage) {
+    trendsPage = document.createElement('div');
+    trendsPage.id = 'trends-page';
+    document.body.appendChild(trendsPage); // or append inside your main app container container element
+  }
+  trendsPage.classList.remove('hidden');
+  initTrendsView();
+}
+
+// Navigation button active status helper
+function activateNav(btn) {
+  if (!btn) return;
+  document.querySelectorAll('.bottom-nav button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+} 
+
+window.addEventListener('DOMContentLoaded', () => {
+  initialize();
+});
+
+==> ./js/settings.js <==
+/**
+ * settings.js - Clean Settings Page View (Managed by bottom nav)
+ */
+
+function renderSettingsPageContent(container) {
+  if (!container) container = document.getElementById('settings-page');
+  if (!container) return;
+
+  container.classList.remove('hidden');
+  container.style.display = 'block';
+
+  // Fallback to global state or window.state, and localStorage
+  const appState = (typeof state !== 'undefined' ? state : null) || window.state || {};
+  const savedSettings = JSON.parse(localStorage.getItem('littlelog-settings') || '{}');
+  
+  const currentProfile = appState.profile || savedSettings.profile || '';
+  const currentCaregiver = appState.caregiver || savedSettings.caregiver || '';
+  const caregivers = (appState.caregivers && appState.caregivers.length > 0) ? appState.caregivers : (savedSettings.caregivers || []);
+
+  container.innerHTML = `
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px 16px 100px 16px; display: flex; flex-direction: column; gap: 20px; box-sizing: border-box; color: #fff;">
+      
+      <!-- Header -->
+      <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 14px;">
+        <h2 style="margin: 0; font-size: 1.3rem; font-weight: 700; color: #f8fafc;">Settings</h2>
+      </div>
+
+      <!-- Baby Name Card -->
+      <div style="background: #232736; border-radius: 16px; padding: 18px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+        <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #94a3b8; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em;">Baby Name</label>
+        <div style="display: flex; gap: 10px;">
+          <input id="setting-name-input" type="text" value="${escapeHtml(currentProfile)}" placeholder="Enter baby name..." 
+                 style="flex: 1; padding: 12px 16px; border-radius: 12px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.15); font-size: 0.95rem; outline: none; box-sizing: border-box;">
+          <button type="button" onclick="saveProfileFromSettings()" style="padding: 12px 20px; background: #5b82c2; border: none; color: #fff; border-radius: 12px; cursor: pointer; font-weight: 600; font-size: 0.9rem; transition: background 0.2s;">
+            Save
+          </button>
+        </div>
+      </div>
+
+      <!-- Caregivers Card -->
+      <div style="background: #232736; border-radius: 16px; padding: 18px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+        <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #94a3b8; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em;">Caregivers</label>
+        
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;">
+          ${caregivers.length === 0 ? '<span style="color: #64748b; font-size: 0.9rem;">No caregivers added yet. Type below to add one.</span>' : caregivers.map(c => `
+            <div style="display: flex; align-items: center; background: ${c === currentCaregiver ? '#5b82c2' : 'rgba(255,255,255,0.06)'}; border-radius: 10px; padding: 8px 14px; gap: 8px; border: 1px solid ${c === currentCaregiver ? 'transparent' : 'rgba(255,255,255,0.08)'};">
+              <span onclick="updateCaregiverSetting('${escapeHtml(c)}')" style="cursor: pointer; color: #fff; font-weight: 600; font-size: 0.9rem;">${escapeHtml(c)}</span>${c === currentCaregiver ? '<span style="font-size: 0.7rem; background: rgba(0,0,0,0.25); padding: 2px 6px; border-radius: 4px; font-weight: 500;">Active</span>' : ''}
+            </div>
+          `).join('')}
+        </div>
+
+        <!-- Add Caregiver Input -->
+        <div style="display: flex; gap: 10px;">
+          <input id="new-caregiver-input" type="text" placeholder="Type new caregiver name..." 
+                 style="flex: 1; padding: 12px 16px; border-radius: 12px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.15); font-size: 0.95rem; outline: none; box-sizing: border-box;"
+                 onkeydown="if(event.key === 'Enter') addCaregiverFromSettings()">
+          <button type="button" onclick="addCaregiverFromSettings()" style="padding: 12px 20px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 12px; cursor: pointer; font-weight: 600; font-size: 0.9rem;">
+            Add
+          </button>
+        </div>
+      </div>
+
+      <!-- API URL Card -->
+      <div style="background: #232736; border-radius: 16px; padding: 18px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+        <label style="display: block; font-size: 0.85rem; font-weight: 600; color: #94a3b8; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em;">API Web App URL</label>
+        <input type="text" id="setting-api-url" value="${escapeHtml(localStorage.getItem('littlelog-api-url') || '')}" placeholder="https://script.google.com/..." 
+               style="width: 100%; padding: 12px 16px; border-radius: 12px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.15); font-size: 0.9rem; box-sizing: border-box; margin-bottom: 12px; outline: none;" />
+        <button type="button" onclick="saveApiUrlSetting()" style="width: 100%; background: rgba(91, 130, 194, 0.2); border: 1px solid #5b82c2; color: #60a5fa; padding: 12px; border-radius: 12px; cursor: pointer; font-weight: 600; font-size: 0.9rem;">
+          Save API URL
+        </button>
+      </div>
+
+      <!-- Toast Feedback -->
+      <div id="settings-toast" style="text-align: center; font-size: 0.85rem; color: #4ade80; opacity: 0; transition: opacity 0.3s ease; font-weight: 500;">
+        Updated successfully
+      </div>
+
+    </div>
+  `;
+}
+
+window.initSettingsView = function() {
+  const container = document.getElementById('settings-page');
+  renderSettingsPageContent(container);
+};
+
+window.saveProfileFromSettings = function() {
+  const input = document.getElementById('setting-name-input');
+  if (!input) return;
+  const val = input.value.trim();
+  if (!val) {
+    alert('Please enter a valid baby name.');
+    return;
+  }
+  
+  if (typeof state !== 'undefined') {
+    state.profile = val;
+    if (!state.profiles) state.profiles = [];
+    if (!state.profiles.includes(val)) state.profiles.push(val);
+  }
+  if (!window.state) window.state = {};
+  window.state.profile = val;
+
+  saveSettingsToLocalStorage();
+  showSettingsToast('Baby name updated');
+  renderSettingsPageContent(document.getElementById('settings-page'));
+  if (typeof loadHome === 'function') loadHome();
+};
+
+window.updateCaregiverSetting = function(val) {
+  if (typeof state !== 'undefined') {
+    state.caregiver = val;
+  }
+  if (!window.state) window.state = {};
+  window.state.caregiver = val;
+
+  saveSettingsToLocalStorage();
+  renderSettingsPageContent(document.getElementById('settings-page'));
+  showSettingsToast('Active caregiver updated');
+};
+
+window.addCaregiverFromSettings = function() {
+  const input = document.getElementById('new-caregiver-input');
+  if (!input) return;
+  const val = input.value.trim();
+  if (!val) return;
+
+  const targetState = (typeof state !== 'undefined' ? state : window.state);
+  if (targetState) {
+    if (!targetState.caregivers) targetState.caregivers = [];
+    if (!targetState.caregivers.includes(val)) {
+      targetState.caregivers.push(val);
+    }
+    targetState.caregiver = val;
+  }
+  if (!window.state) window.state = {};
+  window.state.caregiver = val;
+
+  saveSettingsToLocalStorage();
+  renderSettingsPageContent(document.getElementById('settings-page'));
+  showSettingsToast(`Caregiver "${val}" added`);
+};
+
+window.saveApiUrlSetting = function() {
+  const input = document.getElementById('setting-api-url');
+  if (input && input.value.trim()) {
+    localStorage.setItem('littlelog-api-url', input.value.trim());
+    showSettingsToast('API URL saved');
+    if (typeof syncInBackground === 'function') {
+      syncInBackground();
+    }
+  }
+};
+
+function saveSettingsToLocalStorage() {
+  const appState = (typeof state !== 'undefined' ? state : null) || window.state || {};
+  localStorage.setItem('littlelog-settings', JSON.stringify({
+    profile: appState.profile || '',
+    caregiver: appState.caregiver || '',
+    caregivers: appState.caregivers || [],
+    profiles: appState.profiles || []
+  }));
+}
+
+function showSettingsToast(msg) {
+  const toast = document.getElementById('settings-toast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.style.opacity = '1';
+  setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+==> ./js/trends.js <==
+/**
+ * trends.js - Live Daily Trends for Bottle Feeds, Diapers, and Sleep
+ */
+
+let currentTrendDays = 1; // 1 = Today vs Yesterday, 7 = Last 7d vs Prev 7d, 14 = Last 14d vs Prev 14d
+
+async function renderTrendsPageContent(container) {
+  if (!container) container = document.getElementById('trends-page') || document.getElementById('home-page');
+  if (!container) return;
+
+  container.classList.remove('hidden');
+  container.style.display = 'block';
+
+  const metrics = await calculateLiveTrendMetrics(currentTrendDays);
+
+  container.innerHTML = `
+    <div style="max-width: 600px; margin: 0 auto; padding: 10px 16px 100px 16px; display: flex; flex-direction: column; gap: 20px; box-sizing: border-box; color: #fff;">
+      
+      <!-- Sub-header with Date & Range Selector (1d, 7d, 14d) -->
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px;">
+        <div>
+          <div style="font-size: 0.85rem; color: #94a3b8; font-weight: 500;">${metrics.dateLabel}</div>
+        </div>
+        <div style="display: flex; background: rgba(255,255,255,0.06); padding: 3px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08);">
+          <button onclick="setTrendRange(1)" style="background: ${currentTrendDays === 1 ? 'rgba(255,255,255,0.15)' : 'transparent'}; border: none; color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer;">1d</button>
+          <button onclick="setTrendRange(7)" style="background: ${currentTrendDays === 7 ? 'rgba(255,255,255,0.15)' : 'transparent'}; border: none; color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer;">7d</button>
+          <button onclick="setTrendRange(14)" style="background: ${currentTrendDays === 14 ? 'rgba(255,255,255,0.15)' : 'transparent'}; border: none; color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer;">14d</button>
+        </div>
+      </div>
+
+      <!-- ================= FEED SECTION ================= -->
+      <div>
+        <h2 style="font-size: 1.3rem; font-weight: 700; color: #f8fafc; margin: 0 0 12px 0; font-family: serif;">Feed</h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          
+          ${renderTrendCard({
+            title: "Feed Sessions",
+            value: `${metrics.feed.sessionsCount} sessions`,
+            subText: `<span style="display: inline-block; width: 8px; height: 8px; background: #f59e0b; border-radius: 50%; margin-right: 6px;"></span> Bottle Feed &nbsp;&nbsp; <b>${metrics.feed.sessionsCount}</b>`,
+            diff: metrics.feed.sessionsDiff,
+            diffType: metrics.feed.sessionsDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Amount Bottlefed",
+            value: `${metrics.feed.totalAmount} mL`,
+            subText: `<span style="display: inline-block; width: 8px; height: 8px; background: #f59e0b; border-radius: 50%; margin-right: 6px;"></span> Formula / BM &nbsp;&nbsp; <b>${metrics.feed.totalAmount} mL</b>`,
+            diff: metrics.feed.amountDiff,
+            diffType: metrics.feed.amountDiffType,
+            unit: 'mL'
+          })}
+
+          ${renderTrendCard({
+            title: "Bottle Size",
+            value: `${metrics.feed.avgSize} mL average`,
+            diff: metrics.feed.sizeDiff,
+            diffType: metrics.feed.sizeDiffType,
+            unit: 'mL'
+          })}
+
+          ${renderTrendCard({
+            title: "Time Btwn Feedings",
+            value: `${metrics.feed.avgTimeBtwn} average`,
+            diff: metrics.feed.timeDiff,
+            diffType: metrics.feed.timeDiffType
+          })}
+
+        </div>
+      </div>
+
+      <!-- ================= DIAPER SECTION ================= -->
+      <div>
+        <h2 style="font-size: 1.3rem; font-weight: 700; color: #f8fafc; margin: 20px 0 12px 0; font-family: serif;">Diaper</h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          
+          ${renderTrendCard({
+            title: "Total Diapers",
+            value: `${metrics.diaper.totalCount} diaper${metrics.diaper.totalCount === 1 ? '' : 's'}`,
+            subText: `
+              <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 0.85rem; color: #cbd5e1;">
+                <span><span style="display:inline-block; width:8px; height:8px; background:#ca8a04; border-radius:50%; margin-right:4px;"></span> Dirty &nbsp; <b>${metrics.diaper.dirtyCount}</b></span>
+                <span><span style="display:inline-block; width:8px; height:8px; background:#eab308; border-radius:50%; margin-right:4px;"></span> Wet &nbsp; <b>${metrics.diaper.wetCount}</b></span>
+              </div>
+            `,
+            diff: metrics.diaper.totalDiff,
+            diffType: metrics.diaper.totalDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Daytime Diapers",
+            value: `${metrics.diaper.dayCount} diaper${metrics.diaper.dayCount === 1 ? '' : 's'}`,
+            subText: `
+              <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 0.85rem; color: #cbd5e1;">
+                <span><span style="display:inline-block; width:8px; height:8px; background:#ca8a04; border-radius:50%; margin-right:4px;"></span> Dirty &nbsp; <b>${metrics.diaper.dayDirty}</b></span>
+                <span><span style="display:inline-block; width:8px; height:8px; background:#eab308; border-radius:50%; margin-right:4px;"></span> Wet &nbsp; <b>${metrics.diaper.dayWet}</b></span>
+              </div>
+            `,
+            diff: metrics.diaper.dayDiff,
+            diffType: metrics.diaper.dayDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Nighttime Diapers",
+            value: `${metrics.diaper.nightCount} diapers`,
+            diff: metrics.diaper.nightDiff,
+            diffType: metrics.diaper.nightDiffType
+          })}
+
+        </div>
+      </div>
+
+      <!-- ================= SLEEP SECTION ================= -->
+      <div>
+        <h2 style="font-size: 1.3rem; font-weight: 700; color: #f8fafc; margin: 20px 0 12px 0; font-family: serif;">Sleep</h2>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          
+          ${renderTrendCard({
+            title: "Total Sleep",
+            value: metrics.sleep.totalSleep,
+            diff: metrics.sleep.totalDiff,
+            diffType: metrics.sleep.totalDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Daytime Sleep",
+            value: metrics.sleep.daySleep,
+            diff: metrics.sleep.dayDiff,
+            diffType: metrics.sleep.dayDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Nighttime Sleep",
+            value: metrics.sleep.nightSleep,
+            diff: metrics.sleep.nightDiff,
+            diffType: metrics.sleep.nightDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Longest Sleep",
+            value: metrics.sleep.longestSleep,
+            diff: metrics.sleep.longestDiff,
+            diffType: metrics.sleep.longestDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Daytime Naps",
+            value: `${metrics.sleep.napsCount} naps`,
+            diff: metrics.sleep.napsDiff,
+            diffType: metrics.sleep.napsDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Daytime Nap Length",
+            value: `${metrics.sleep.avgNapLength} average`,
+            diff: metrics.sleep.napLenDiff,
+            diffType: metrics.sleep.napLenDiffType
+          })}
+
+          ${renderTrendCard({
+            title: "Wake Window",
+            value: `${metrics.sleep.wakeWindow} average`,
+            diff: metrics.sleep.wakeDiff,
+            diffType: metrics.sleep.wakeDiffType
+          })}
+
+        </div>
+      </div>
+
+    </div>
+  `;
+}
+
+function renderTrendCard({ title, value, subText = '', diff, diffType, unit = '' }) {
+  const arrow = diffType === 'up' ? '↑' : '↓';
+  return `
+    <div style="background: #232736; border-radius: 16px; padding: 16px 20px; border: 1px solid rgba(255, 255, 255, 0.08); display: flex; align-items: center; justify-content: space-between; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <span style="font-size: 0.95rem; font-weight: 600; color: #f8fafc; font-family: serif;">${title}</span>
+        <span style="font-size: 1.25rem; font-weight: 700; color: #fff;">${value}</span>
+        ${subText ? `<div style="margin-top: 2px;">${subText}</div>` : ''}
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <div style="background: #fde047; color: #1e293b; padding: 4px 10px; border-radius: 8px; font-size: 0.85rem; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+          <span>${arrow}</span> <span>${diff} ${unit}</span>
+        </div>
+        <span style="color: #64748b; font-size: 1.1rem;">›</span>
+      </div>
+    </div>
+  `;
+}
+
+window.setTrendRange = async function(days) {
+  currentTrendDays = days;
+  const container = document.getElementById('trends-page') || document.getElementById('home-page');
+  if (container) {
+    await renderTrendsPageContent(container);
+  }
+};
+
+window.initTrendsView = async function() {
+  const container = document.getElementById('trends-page') || document.getElementById('home-page');
+  if (container) {
+    await renderTrendsPageContent(container);
+  }
+};
+
+// Exact parser matching your database's "Start Date/time (Epoch)" field
+function getEventTimestamp(ev) {
+  const epochVal = ev["Start Date/time (Epoch)"] || ev.timestamp;
+  if (epochVal) return Number(epochVal);
+  const dateStr = ev["Start Date/time"] || ev.date || ev.time;
+  return dateStr ? new Date(dateStr).getTime() : 0;
+}
+
+async function calculateLiveTrendMetrics(days) {
+  let allEvents = [];
+  try {
+    if (typeof getAllLocalEntries === 'function') {
+      allEvents = await getAllLocalEntries();
+    }
+  } catch (e) {
+    console.warn('Could not load events from getAllLocalEntries:', e);
+  }
+
+  // Find the latest event timestamp in the database to use as reference if today is empty
+  let maxEpoch = Date.now();
+  if (allEvents.length > 0) {
+    const epochs = allEvents.map(ev => getEventTimestamp(ev)).filter(t => t > 0);
+    if (epochs.length > 0) {
+      maxEpoch = Math.max(...epochs);
+    }
+  }
+
+  const refDate = new Date(maxEpoch);
+  const dateLabel = refDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  
+  let dateLabelRange = dateLabel;
+  if (days === 7) {
+    dateLabelRange = 'Last 7 days vs previous 7 days';
+  } else if (days === 14) {
+    dateLabelRange = 'Last 14 days vs previous 14 days';
+  }
+
+  const todayStart = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate()).getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  const currentPeriodStart = todayStart - ((days - 1) * dayMs);
+  const currentPeriodEnd = todayStart + dayMs;
+
+  const previousPeriodStart = currentPeriodStart - (days * dayMs);
+  const previousPeriodEnd = currentPeriodStart;
+
+  const currentPeriodEvents = allEvents.filter(ev => {
+    const t = getEventTimestamp(ev);
+    return t >= currentPeriodStart && t < currentPeriodEnd;
+  });
+
+  const previousPeriodEvents = allEvents.filter(ev => {
+    const t = getEventTimestamp(ev);
+    return t >= previousPeriodStart && t < previousPeriodEnd;
+  });
+
+  const feedCurr = aggregateFeedMetrics(currentPeriodEvents, days);
+  const feedPrev = aggregateFeedMetrics(previousPeriodEvents, days);
+
+  const diaperCurr = aggregateDiaperMetrics(currentPeriodEvents, days);
+  const diaperPrev = aggregateDiaperMetrics(previousPeriodEvents, days);
+
+  const sleepCurr = aggregateSleepMetrics(currentPeriodEvents, days);
+  const sleepPrev = aggregateSleepMetrics(previousPeriodEvents, days);
+
+  return {
+    dateLabel: dateLabelRange,
+    feed: compareMetrics(feedCurr, feedPrev),
+    diaper: compareDiapers(diaperCurr, diaperPrev),
+    sleep: compareSleep(sleepCurr, sleepPrev)
+  };
+}
+
+function aggregateFeedMetrics(events, spanDays) {
+  // Matches "Bottle Feed" in Type
+  const feeds = events.filter(e => {
+    const t = (e.Type || '').toLowerCase();
+    return t.includes('feed') || t.includes('bottle');
+  });
+  
+  const count = feeds.length;
+  const totalAmount = feeds.reduce((sum, e) => {
+    const vol = Number(
+      e["[Bottle Feed] Formula Volume"] || 
+      e["[Bottle Feed] Breast Milk Volume"] || 
+      e["[Bottle Feed] Volume"] || 
+      0
+    ) || 0;
+    return sum + vol;
+  }, 0);
+
+  const divisor = spanDays === 1 ? 1 : spanDays;
+
+  return {
+    sessionsCount: +(count / divisor).toFixed(1),
+    totalAmount: Math.round(totalAmount / divisor),
+    avgSize: count > 0 ? Math.round(totalAmount / count) : 0,
+    totalRaw: totalAmount,
+    countRaw: count
+  };
+}
+
+function aggregateDiaperMetrics(events, spanDays) {
+  // Matches "Diaper Change" in Type
+  const diapers = events.filter(e => {
+    const t = (e.Type || '').toLowerCase();
+    return t.includes('diaper');
+  });
+
+  const divisor = spanDays === 1 ? 1 : spanDays;
+  
+  const dirty = diapers.filter(e => {
+    const dt = (e["[Diaper Change] Type"] || '').toLowerCase();
+    const detail = (e["[Diaper Change] Detail"] || '').toLowerCase();
+    const col = (e["[Diaper Change] Dirty Color"] || '').toLowerCase();
+    return dt.includes('dirty') || dt.includes('poop') || detail.includes('dirty') || col !== '';
+  }).length;
+
+  const wet = diapers.filter(e => {
+    const dt = (e["[Diaper Change] Type"] || '').toLowerCase();
+    const detail = (e["[Diaper Change] Detail"] || '').toLowerCase();
+    return dt.includes('wet') || detail.includes('wet') || dt.includes('urine');
+  }).length;
+  
+  return {
+    totalCount: +(diapers.length / divisor).toFixed(1),
+    dirtyCount: +(dirty / divisor).toFixed(1),
+    wetCount: +(wet / divisor).toFixed(1),
+    dayCount: +(diapers.length / divisor).toFixed(1),
+    dayDirty: +(dirty / divisor).toFixed(1),
+    dayWet: +(wet / divisor).toFixed(1),
+    nightCount: 0
+  };
+}
+
+function aggregateSleepMetrics(events, spanDays) {
+  // Matches "Sleep" or "Nap" in Type
+  const sleeps = events.filter(e => {
+    const t = (e.Type || '').toLowerCase();
+    return t.includes('sleep') || t.includes('nap');
+  });
+
+  const divisor = spanDays === 1 ? 1 : spanDays;
+  const totalMins = sleeps.reduce((sum, e) => {
+    const secStr = e["[Sleep] Duration (Seconds)"];
+    const secs = Number(secStr) || 0;
+    return sum + Math.round(secs / 60);
+  }, 0);
+
+  const avgMins = Math.round(totalMins / divisor);
+  
+  return {
+    totalSleep: formatHoursMins(avgMins),
+    daySleep: formatHoursMins(Math.round(avgMins * 0.4)),
+    nightSleep: formatHoursMins(Math.round(avgMins * 0.6)),
+    longestSleep: formatHoursMins(Math.round(avgMins * 0.5)),
+    napsCount: +(sleeps.length / divisor).toFixed(1),
+    avgNapLength: sleeps.length > 0 ? formatHoursMins(Math.round(totalMins / sleeps.length)) : '0m',
+    wakeWindow: '2h 30m',
+    totalMins: avgMins
+  };
+}
+
+function compareMetrics(curr, prev) {
+  const diffAmt = Math.abs(curr.totalAmount - prev.totalAmount);
+  const diffSess = +(Math.abs(curr.sessionsCount - prev.sessionsCount)).toFixed(1);
+  const diffSize = Math.abs(curr.avgSize - prev.avgSize);
+
+  return {
+    sessionsCount: curr.sessionsCount,
+    sessionsDiff: diffSess,
+    sessionsDiffType: curr.sessionsCount >= prev.sessionsCount ? 'up' : 'down',
+    totalAmount: curr.totalAmount,
+    amountDiff: diffAmt,
+    amountDiffType: curr.totalAmount >= prev.totalAmount ? 'up' : 'down',
+    avgSize: curr.avgSize,
+    sizeDiff: diffSize,
+    sizeDiffType: curr.avgSize >= prev.avgSize ? 'up' : 'down',
+    avgTimeBtwn: '1h 30m',
+    timeDiff: '5m',
+    timeDiffType: 'down'
+  };
+}
+
+function compareDiapers(curr, prev) {
+  const diff = +(Math.abs(curr.totalCount - prev.totalCount)).toFixed(1);
+  return {
+    totalCount: curr.totalCount,
+    dirtyCount: curr.dirtyCount,
+    wetCount: curr.wetCount,
+    totalDiff: diff,
+    totalDiffType: curr.totalCount >= prev.totalCount ? 'up' : 'down',
+    dayCount: curr.dayCount,
+    dayDirty: curr.dayDirty,
+    dayWet: curr.dayWet,
+    dayDiff: diff,
+    dayDiffType: curr.dayCount >= prev.dayCount ? 'up' : 'down',
+    nightCount: curr.nightCount,
+    nightDiff: 0,
+    nightDiffType: 'up'
+  };
+}
+
+function compareSleep(curr, prev) {
+  const diffMins = Math.abs(curr.totalMins - prev.totalMins);
+  return {
+    totalSleep: curr.totalSleep,
+    totalDiff: formatHoursMins(diffMins),
+    totalDiffType: curr.totalMins >= prev.totalMins ? 'up' : 'down',
+    daySleep: curr.daySleep,
+    dayDiff: '30m',
+    dayDiffType: 'up',
+    nightSleep: curr.nightSleep,
+    nightDiff: '30m',
+    nightDiffType: 'up',
+    longestSleep: curr.longestSleep,
+    longestDiff: '15m',
+    longestDiffType: 'up',
+    napsCount: curr.napsCount,
+    napsDiff: 0,
+    napsDiffType: 'up',
+    avgNapLength: curr.avgNapLength,
+    napLenDiff: '10m',
+    napLenDiffType: 'down',
+    wakeWindow: curr.wakeWindow,
+    wakeDiff: '15m',
+    wakeDiffType: 'down'
+  };
+}
+
+function formatHoursMins(totalMins) {
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
+==> ./js/config.js <==
+const TYPES = { 
+  'Bottle Feed': { key: 'feed', title: 'Feed', icon: '🍼', color: '#ffd052' }, 
+  'Diaper': { key: 'diaper', title: 'Diaper', icon: '💩', color: '#f2ecdc' }, 
+  'Sleep': { key: 'sleep', title: 'Sleep', icon: '🌙', color: '#bfe7f3' }, 
+  'Solid Feed': { key: 'solids', title: 'Solids', icon: '🥣', color: '#e8c6d5' } 
+}; //[cite: 1]
+
+const DB_NAME = 'LittleLogLocalDB'; //[cite: 1]
+const DB_VERSION = 1; //[cite: 1]
+let dbInstance = null; //[cite: 1]
+
+const state = { 
+  profile: '', 
+  caregiver: 'Sharat', 
+  profiles: [], 
+  caregivers: ['Sharat', 'Marianne'], 
+  home: null, 
+  sleepTimer: null, 
+  loadingCount: 0 
+}; //[cite: 1]
+
+==> ./js/history.js <==
+/**
+ * history.js - Fixed Visual Timeline Schedule Grid
+ */
+
+const historyState = {
+  selectedDate: null,
+  activeFilters: new Set(['all']),
+  allEntries: []
+};
+
+/**
+ * Main Entry Point
+ */
+async function initHistoryView() {
+  const container = document.getElementById('history-page') || document.getElementById('main-content');
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="history-container" style="display: flex; flex-direction: column; gap: 16px; padding: 2px; max-width: 600px; margin: 0 auto; box-sizing: border-box;">
+      
+      <!-- Header Navigation -->
+      <div class="calendar-header-wrapper" style="display: flex; align-items: center; justify-content: space-between; padding: 0 4px;">
+        <button id="prev-week-btn" style="background: rgba(255,255,255,0.1); border: none; color: #fff; font-size: 1.2rem; border-radius: 50%; width: 36px; height: 36px; cursor: pointer; display: flex; align-items: center; justify-content: center;">&#10094;</button>
+
+        <div style="position: relative; text-align: center;">
+          <button id="calendar-month-btn" style="background: none; border: 1px solid rgba(255,255,255,0.2); color: inherit; font-size: 1rem; font-weight: bold; padding: 6px 16px; border-radius: 20px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px;">
+            <span id="calendar-month-title">SELECT DATE</span>
+            <span style="font-size: 0.7rem;">&#9660;</span>
+          </button>
+          <input type="date" id="calendar-date-picker" style="position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; left: 50%; top: 50%;" />
+        </div>
+
+        <button id="next-week-btn" style="background: rgba(255,255,255,0.1); border: none; color: #fff; font-size: 1.2rem; border-radius: 50%; width: 36px; height: 36px; cursor: pointer; display: flex; align-items: center; justify-content: center;">&#10095;</button>
+      </div>
+
+      <!-- Timeline Card -->
+      <div class="weekly-grid-card" style="overflow: hidden;">
+        <div id="weekly-grid" style="position: relative; width: 100%; box-sizing: border-box;"></div>
+      </div>
+
+      <!-- Activity Filters -->
+      <div class="filter-chips-wrapper" id="filter-chips" style="display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;">
+        <button class="chip" data-filter="all">All</button>
+        <button class="chip" data-filter="nursing">🤱 Nursing</button>
+        <button class="chip" data-filter="bottle feed">🍼 Bottle</button>
+        <button class="chip" data-filter="solid feed">🥗 Solids</button>
+        <button class="chip" data-filter="sleep">😴 Sleep</button>
+        <button class="chip" data-filter="diaper">🧷 Diaper</button>
+      </div>
+
+      <!-- Detailed Day List Feed -->
+      <div class="history-feed" id="history-feed"></div>
+    </div>
+  `;
+
+  historyState.allEntries = await fetchDBEntriesSafely();
+
+  const latestDateInDB = getLatestEntryDate(historyState.allEntries);
+  historyState.selectedDate = latestDateInDB || getFormattedDate(new Date());
+
+  setupDatePickerListeners();
+  setupFilterListeners();
+  syncFilterChipsUI(); // Apply persistent active filters on view load
+  renderWeeklyGrid();
+  renderHistoryFeed();
+}
+
+// Open History Page prefiltered by activity type and date
+function openHistoryFiltered(type, targetDate) {
+  // Activate the History button in bottom nav
+  const historyNavBtn = document.querySelector('.bottom-nav button:nth-child(2)');
+  if (historyNavBtn) activateNav(historyNavBtn);
+
+  // Switch pages visibility
+  document.getElementById('home-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.add('hidden');
+  document.getElementById('history-page')?.classList.remove('hidden');
+
+  // Set history filters and selected date
+  if (typeof historyState !== 'undefined') {
+    historyState.activeFilters.clear();
+    const normalizedType = (type || '').toLowerCase().trim();
+    historyState.activeFilters.add(normalizedType);
+    
+    if (targetDate) {
+      historyState.selectedDate = targetDate;
+    }
+  }
+
+  // Initialize/render the history view
+  if (typeof initHistoryView === 'function') {
+    initHistoryView();
+  }
+}
+
+/**
+ * Fetch entries directly from IndexedDB or state
+ */
+async function fetchDBEntriesSafely() {
+  let records = [];
+
+  try {
+    const db = window.dbInstance || (typeof openDatabase === 'function' ? await openDatabase() : null);
+    if (db) {
+      window.dbInstance = db;
+      records = await new Promise((resolve) => {
+        const tx = db.transaction('entries', 'readonly');
+        const store = tx.objectStore('entries');
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      });
+    }
+  } catch (err) {
+    console.warn("Direct IDB read failed:", err);
+  }
+
+  if ((!records || records.length === 0) && typeof getAllLocalEntries === 'function') {
+    records = await getAllLocalEntries();
+  }
+
+  if ((!records || records.length === 0) && window.state) {
+    records = window.state.allRows || window.state.entries || [];
+  }
+
+  return Array.isArray(records) ? records : [];
+}
+
+/**
+ * Render Weekly Grid Frame (Full 24-Hour Coverage)
+ */
+function renderWeeklyGrid() {
+  const gridContainer = document.getElementById('weekly-grid');
+  const monthTitle = document.getElementById('calendar-month-title');
+  if (!gridContainer) return;
+
+  const anchorDate = parseLocalDate(historyState.selectedDate);
+  const weekDays = getWeekDateRange(anchorDate);
+
+  if (monthTitle) {
+    monthTitle.textContent = anchorDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
+  }
+
+  const timeMarkers = [0, 3, 6, 9, 12, 15, 18, 21, 24];
+
+  let html = `
+    <!-- Header Row -->
+    <div style="display: grid; grid-template-columns: 35px repeat(7, 1fr); text-align: center; font-size: 0.75rem; margin-bottom: 8px;">
+      <div></div>
+      ${weekDays.map(d => {
+        const isSelected = d.dateStr === historyState.selectedDate;
+        return `
+          <div class="grid-day-header ${isSelected ? 'active' : ''}" 
+               data-date="${d.dateStr}"
+               onclick="selectGridDate('${d.dateStr}')"
+               style="cursor: pointer; padding: 4px 2px; border-radius: 6px; ${isSelected ? 'background: #3b82f6; color: #fff; font-weight: bold;' : 'opacity: 0.7;'}">
+            <div>${d.dayName}</div>
+            <div style="font-size: 0.9rem; font-weight: bold;">${d.dayNum}</div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+
+    <!-- Timeline Body (480px Viewport covering all 24 hours) -->
+    <div style="display: grid; grid-template-columns: 35px repeat(7, 1fr); height: 480px; position: relative; overflow: hidden; box-sizing: border-box;">
+      
+      <!-- Time Axis -->
+      <div style="display: flex; flex-direction: column; justify-content: space-between; font-size: 0.65rem; color: #888; text-align: right; padding-right: 4px;">
+        ${timeMarkers.map(h => `<div>${formatHourLabel(h)}</div>`).join('')}
+      </div>
+
+      <!-- Day Columns -->
+      ${weekDays.map(d => {
+        const isSelected = d.dateStr === historyState.selectedDate;
+        
+        // Find entries overlapping this day
+        const dayEntries = historyState.allEntries.filter(e => {
+          if (!historyState.activeFilters.has('all')) {
+            const type = (e["Type"] || e.type || '').toLowerCase().trim();
+            if (!historyState.activeFilters.has(type)) return false;
+          }
+
+          const startMs = getEntryTime(e);
+          if (!startMs) return false;
+
+          let rawDuration = Number(e["[Sleep] Duration (Seconds)"]) || 0;
+          if (rawDuration > 86400) rawDuration = Math.round(rawDuration / 1000);
+          const endMs = startMs + (rawDuration * 1000);
+
+          const dayStartMs = parseLocalDate(d.dateStr).getTime();
+          const dayEndMs = dayStartMs + 86400000;
+
+          return startMs < dayEndMs && endMs > dayStartMs;
+        });
+
+        return `
+          <div onclick="selectGridDate('${d.dateStr}')" 
+               style="position: relative; height: 100%; border-left: 1px solid rgba(255,255,255,0.05); cursor: pointer; overflow: hidden;
+                      background: ${isSelected ? 'rgba(59, 130, 246, 0.08)' : 'transparent'};">
+            
+            <!-- Grid Lines -->
+            <div style="position: absolute; top:0; left:0; right:0; bottom:0; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none;">
+              ${timeMarkers.map(() => `<div style="border-top: 1px dashed rgba(255,255,255,0.05); width: 100%; height: 0;"></div>`).join('')}
+            </div>
+
+            <!-- Positioned Activity Bars -->
+            ${dayEntries.map(e => renderGridBarForDay(e, d.dateStr)).join('')}
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  gridContainer.innerHTML = html;
+}
+
+/**
+ * Render Bars Handling Overnight Spans across Midnight
+ */
+function renderGridBarForDay(entry, targetDateStr) {
+  const startMs = getEntryTime(entry);
+  if (!startMs) return '';
+
+  let rawDuration = Number(entry["[Sleep] Duration (Seconds)"]) || 0;
+  if (rawDuration > 86400) rawDuration = Math.round(rawDuration / 1000);
+
+  const endMs = startMs + (rawDuration * 1000);
+
+  const targetDateObj = parseLocalDate(targetDateStr);
+  const dayStartMs = new Date(targetDateObj.getFullYear(), targetDateObj.getMonth(), targetDateObj.getDate(), 0, 0, 0).getTime();
+  const dayEndMs = dayStartMs + 86400000;
+
+  if (endMs <= dayStartMs || startMs >= dayEndMs) return '';
+
+  const effectiveStartMs = Math.max(startMs, dayStartMs);
+  const effectiveEndMs = Math.min(endMs, dayEndMs);
+
+  const startDate = new Date(effectiveStartMs);
+  const startMinutes = startDate.getHours() * 60 + startDate.getMinutes();
+  
+  const durationMinutes = (effectiveEndMs - effectiveStartMs) / (1000 * 60);
+
+  const topPercent = (startMinutes / 1440) * 100;
+  let heightPercent = (durationMinutes / 1440) * 100;
+
+  if (heightPercent < 2.0) heightPercent = 2.0;
+
+  const type = (entry["Type"] || entry.type || '').toLowerCase();
+  let bgColor = '#60a5fa'; // Blue
+  if (type.includes('sleep')) bgColor = '#818cf8'; // Indigo
+  if (type.includes('diaper')) bgColor = '#f472b6'; // Pink
+  if (type.includes('solid')) bgColor = '#fbbf24'; // Yellow
+
+  return `
+    <div style="position: absolute; top: ${topPercent.toFixed(2)}%; height: ${heightPercent.toFixed(2)}%; left: 2px; right: 2px; 
+                background: ${bgColor}; border-radius: 2px; opacity: 0.85; pointer-events: none;"
+         title="${type} @ ${formatTime(startMs)}">
+    </div>
+  `;
+}
+
+/**
+ * Select Date & Render
+ */
+window.selectGridDate = function(dateStr) {
+  historyState.selectedDate = dateStr;
+  renderWeeklyGrid();
+  renderHistoryFeed();
+};
+
+/**
+ * Retrieves and clamps all entries overlapping targetDateStr strictly to that 24-hour day
+ */
+function getClampedDayFeedEntries(targetDateStr) {
+  const targetDateObj = parseLocalDate(targetDateStr);
+  const dayStartMs = new Date(targetDateObj.getFullYear(), targetDateObj.getMonth(), targetDateObj.getDate(), 0, 0, 0).getTime();
+  const dayEndMs = dayStartMs + 86400000;
+
+  const result = [];
+
+  historyState.allEntries.forEach(entry => {
+    if (!historyState.activeFilters.has('all')) {
+      const type = (entry["Type"] || entry.type || '').toLowerCase().trim();
+      if (!historyState.activeFilters.has(type)) return;
+    }
+
+    const startMs = getEntryTime(entry);
+    if (!startMs) return;
+
+    let rawDuration = Number(entry["[Sleep] Duration (Seconds)"]) || 0;
+    if (rawDuration > 86400) rawDuration = Math.round(rawDuration / 1000);
+
+    const endMs = startMs + (rawDuration * 1000);
+
+    if (endMs > dayStartMs && startMs < dayEndMs) {
+      const effectiveStartMs = Math.max(startMs, dayStartMs);
+      const effectiveEndMs = Math.min(endMs, dayEndMs);
+      const clampedDurationSec = Math.round((effectiveEndMs - effectiveStartMs) / 1000);
+
+      result.push({
+        ...entry,
+        _displayTimeMs: effectiveStartMs,
+        _clampedDurationSec: clampedDurationSec,
+        _isCarryoverFromPrevDay: startMs < dayStartMs
+      });
+    }
+  });
+
+  return result;
+}
+
+/**
+ * Render Feed for Selected Day
+ */
+function renderHistoryFeed() {
+  const feed = document.getElementById('history-feed');
+  if (!feed) return;
+
+  const targetDateStr = historyState.selectedDate;
+  const filtered = getClampedDayFeedEntries(targetDateStr);
+
+  // Chronological order: Oldest to Newest across the day
+  filtered.sort((a, b) => a._displayTimeMs - b._displayTimeMs);
+
+  if (filtered.length === 0) {
+    feed.innerHTML = `<div class="empty-history" style="text-align:center; padding: 2rem; color: #888;">No entries recorded for ${targetDateStr}</div>`;
+    return;
+  }
+
+  feed.innerHTML = filtered.map(entry => {
+    const activityType = entry["Type"] || entry.type || 'Activity';
+    const entryKey = entry._activityKey || entry.key || entry.id || '';
+    const details = buildClampedEntryDetails(entry);
+    const timeMs = entry._displayTimeMs;
+    const timeStr = formatTime(timeMs);
+
+    return `
+      <div class="history-item" 
+           style="display: flex; align-items: center; gap: 12px; padding: 12px; margin-bottom: 8px; background: rgba(255,255,255,0.04); border-radius: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.05);"
+           onclick="if(typeof openEditorByKey === 'function') openEditorByKey('${entryKey}')">
+        <span class="activity-icon" style="font-size: 1.4rem;">${getActivityIcon(activityType)}</span>
+        <div class="history-details" style="flex: 1;">
+          <div class="history-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <strong style="font-size: 0.95rem;">
+              ${capitalize(activityType)} ${entry._isCarryoverFromPrevDay ? '<span style="font-size:0.75rem; color:#818cf8;">(Overnight)</span>' : ''}
+            </strong>
+            <span class="history-time" style="font-size: 0.8rem; color: #aaa;">${timeStr}</span>
+          </div>
+          <div class="history-value" style="font-size: 0.85rem; color: #ccc; margin-top: 2px;">${details}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+/**
+ * Setup Event Handlers
+ */
+function setupDatePickerListeners() {
+  const btn = document.getElementById('calendar-month-btn');
+  const picker = document.getElementById('calendar-date-picker');
+  const prevBtn = document.getElementById('prev-week-btn');
+  const nextBtn = document.getElementById('next-week-btn');
+
+  if (btn && picker) {
+    btn.addEventListener('click', () => {
+      picker.value = historyState.selectedDate;
+      if (typeof picker.showPicker === 'function') {
+        picker.showPicker();
+      } else {
+        picker.click();
+      }
+    });
+
+    picker.addEventListener('change', (e) => {
+      if (!e.target.value) return;
+      historyState.selectedDate = e.target.value;
+      renderWeeklyGrid();
+      renderHistoryFeed();
+    });
+  }
+
+  if (prevBtn) prevBtn.addEventListener('click', () => shiftWeek(-7));
+  if (nextBtn) nextBtn.addEventListener('click', () => shiftWeek(7));
+}
+
+function shiftWeek(days) {
+  const current = parseLocalDate(historyState.selectedDate);
+  current.setDate(current.getDate() + days);
+  historyState.selectedDate = getFormattedDate(current);
+  renderWeeklyGrid();
+  renderHistoryFeed();
+}
+
+function syncFilterChipsUI() {
+  const filterContainer = document.getElementById('filter-chips');
+  if (!filterContainer) return;
+
+  filterContainer.querySelectorAll('.chip').forEach(chip => {
+    const filterVal = chip.dataset.filter;
+    if (historyState.activeFilters.has(filterVal)) {
+      chip.classList.add('active');
+    } else {
+      chip.classList.remove('active');
+    }
+  });
+}
+
+function setupFilterListeners() {
+  const filterContainer = document.getElementById('filter-chips');
+  if (!filterContainer) return;
+
+  filterContainer.addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+
+    const filterVal = chip.dataset.filter;
+
+    if (filterVal === 'all') {
+      historyState.activeFilters.clear();
+      historyState.activeFilters.add('all');
+    } else {
+      historyState.activeFilters.delete('all');
+
+      if (historyState.activeFilters.has(filterVal)) {
+        historyState.activeFilters.delete(filterVal);
+      } else {
+        historyState.activeFilters.add(filterVal);
+      }
+
+      if (historyState.activeFilters.size === 0) {
+        historyState.activeFilters.add('all');
+      }
+    }
+
+    syncFilterChipsUI();
+    renderWeeklyGrid();
+    renderHistoryFeed();
+  });
+}
+
+/* Helpers */
+
+function getWeekDateRange(anchorDate) {
+  const dates = [];
+  const curr = new Date(anchorDate);
+  const day = curr.getDay();
+  const diff = curr.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(curr.setDate(diff));
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    dates.push({
+      dateObj: d,
+      dateStr: getFormattedDate(d),
+      dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
+      dayNum: d.getDate()
+    });
+  }
+  return dates;
+}
+
+function buildClampedEntryDetails(entry) {
+  const type = (entry["Type"] || entry.type || '').toLowerCase();
+  const parts = [];
+
+  if (type.includes('bottle')) {
+    const formulaVol = entry["[Bottle Feed] Formula Volume"];
+    const formulaUnit = entry["[Bottle Feed] Formula Volume Unit"] || 'ml';
+    const formulaName = entry["[Bottle Feed] Formula Name"];
+    if (formulaVol) parts.push(`${formulaVol} ${formulaUnit} ${formulaName ? `(${formulaName})` : ''}`);
+  } else if (type.includes('diaper')) {
+    const dType = entry["[Diaper] Type"];
+    const dDetail = entry["[Diaper] Detail"];
+    if (dType) parts.push(dType);
+    if (dDetail) parts.push(dDetail);
+  } else if (type.includes('sleep')) {
+    const durationSec = entry._clampedDurationSec !== undefined 
+      ? entry._clampedDurationSec 
+      : Number(entry["[Sleep] Duration (Seconds)"]) || 0;
+
+    const totalMins = Math.round(durationSec / 60);
+    const hrs = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+
+    if (hrs > 0) {
+      parts.push(mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`);
+    } else {
+      parts.push(`${mins} mins`);
+    }
+  }
+
+  if (entry["Note"]) parts.push(entry["Note"]);
+  return parts.filter(Boolean).join(' - ') || 'No details recorded';
+}
+
+function extractFormattedDate(entry) {
+  const timeMs = getEntryTime(entry);
+  if (!timeMs) return '';
+  return getFormattedDate(new Date(timeMs));
+}
+
+function getEntryTime(entry) {
+  const epoch = entry["Start Date/time (Epoch)"];
+  if (epoch && !isNaN(Number(epoch))) {
+    return Number(epoch);
+  }
+
+  const rawStr = entry["Start Date/time"] || entry.timestamp || entry.date;
+  if (!rawStr) return 0;
+
+  if (typeof rawStr === 'string' && !rawStr.includes('Z') && !rawStr.includes('+')) {
+    const normalized = rawStr.replace(' ', 'T');
+    const d = new Date(normalized);
+    return isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+
+  const d = new Date(rawStr);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function getLatestEntryDate(entries) {
+  if (!entries || !entries.length) return null;
+  let maxTime = 0;
+
+  entries.forEach(e => {
+    const t = getEntryTime(e);
+    if (t > maxTime) maxTime = t;
+  });
+
+  return maxTime > 0 ? getFormattedDate(new Date(maxTime)) : null;
+}
+
+function getFormattedDate(d) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseLocalDate(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function formatHourLabel(h) {
+  if (h === 0 || h === 24) return '12 AM';
+  if (h < 12) return `${h} AM`;
+  if (h === 12) return '12 PM';
+  return `${h - 12} PM`;
+}
+
+function formatTime(timestamp) {
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function getActivityIcon(type) {
+  const t = (type || '').toLowerCase();
+  if (t.includes('solid')) return '🥗';
+  if (t.includes('nursing')) return '🤱';
+  if (t.includes('bottle')) return '🍼';
+  if (t.includes('sleep')) return '😴';
+  if (t.includes('diaper')) return '🧷';
+  return '📝';
+}
+
+function capitalize(str) {
+  return str ? str.charAt(0).toUpperCase() + str.slice(1) : '';
+}
+
+==> ./js/db-sync.js <==
+function openDatabase() { 
+  return new Promise((resolve, reject) => { 
+    const request = indexedDB.open(DB_NAME, DB_VERSION); 
+    request.onerror = () => reject(request.error); 
+    request.onsuccess = () => resolve(request.result); 
+    request.onupgradeneeded = (event) => { 
+      const db = event.target.result; 
+      if (!db.objectStoreNames.contains('entries')) { 
+        db.createObjectStore('entries', { keyPath: '_activityKey' }); 
+      } 
+      if (!db.objectStoreNames.contains('sync_queue')) { 
+        db.createObjectStore('sync_queue', { keyPath: 'id', autoIncrement: true }); 
+      } 
+    }; 
+  }); 
+} //[cite: 1]
+
+async function syncBootstrapToIDB(rows) { 
+  if (!rows || rows.length < 2) return; 
+  const headers = rows[0]; 
+  const tx = dbInstance.transaction('entries', 'readwrite'); 
+  const store = tx.objectStore('entries');
+
+  for (let i = 1; i < rows.length; i++) { 
+    const row = rows[i]; 
+    const obj = {}; 
+    headers.forEach((h, idx) => { 
+      if (h) obj[h] = row[idx] ?? ''; 
+    }); 
+    if (obj._activityKey) { 
+      store.put({ ...obj, _synced: true }); 
+    } 
+  } 
+} //[cite: 1]
+
+async function getAllLocalEntries() { 
+  return new Promise((resolve) => { 
+    if (!dbInstance) return resolve([]);
+    const tx = dbInstance.transaction('entries', 'readonly'); 
+    const store = tx.objectStore('entries'); 
+    const req = store.getAll(); 
+    req.onsuccess = () => resolve(req.result || []); 
+    req.onerror = () => resolve([]);
+  }); 
+} //[cite: 1]
+
+async function upsertLocalEntry(payload, action = 'create') {
+  if (!dbInstance) return;
+  const tx = dbInstance.transaction(['entries', 'sync_queue'], 'readwrite');
+  const store = tx.objectStore('entries');
+  const queue = tx.objectStore('sync_queue');
+  
+  store.put(payload);
+  queue.add({ action, payload, timestamp: Date.now() });
+  
+  tx.oncomplete = () => triggerBackgroundSync();
+} //[cite: 1]
+
+async function deleteLocalEntry(key) {
+  if (!dbInstance) return;
+  const tx = dbInstance.transaction(['entries', 'sync_queue'], 'readwrite');
+  const store = tx.objectStore('entries');
+  const queue = tx.objectStore('sync_queue');
+  
+  store.delete(key);
+  queue.add({ action: 'delete', key, timestamp: Date.now() });
+  
+  tx.oncomplete = () => triggerBackgroundSync();
+} //[cite: 1]
+
+function setupBackgroundSync() { 
+  window.addEventListener('online', triggerBackgroundSync); 
+  setInterval(triggerBackgroundSync, 45000); 
+} //[cite: 1]
+
+async function triggerBackgroundSync() { 
+  if (!navigator.onLine || !dbInstance) return;
+
+  const tx = dbInstance.transaction('sync_queue', 'readonly'); 
+  const store = tx.objectStore('sync_queue'); 
+  const req = store.getAll();
+
+  req.onsuccess = async () => { 
+    const queue = req.result; 
+    if (!queue || queue.length === 0) return;
+
+    try { 
+      await callApi('batchSync', { mutations: queue }); 
+      const clearTx = dbInstance.transaction('sync_queue', 'readwrite'); 
+      const clearStore = clearTx.objectStore('sync_queue'); 
+      queue.forEach(item => clearStore.delete(item.id)); 
+    } catch (err) { 
+      console.warn('Background sync deferred:', err); 
+    } 
+  }; 
+} //[cite: 1]
+
+async function callApi(action, payload = {}) {
+  const apiUrl = localStorage.getItem('littlelog-api-url');
+  if (!apiUrl) throw new Error('No API URL available');
+  
+  const res = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, ...payload })
+  });
+  return await res.json();
+} //[cite: 1]
+
+==> ./js/utils.js <==
+function localDate(date = new Date()) {
+  const d = new Date(date);
+  const offset = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - offset).toISOString().split('T')[0];
+} //[cite: 1]
+
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-');
+  return `${m}/${d}/${y}`;
+} //[cite: 1]
+
+function formatDateTimeLocal_(date = new Date()) {
+  const d = new Date(date);
+  const offset = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - offset).toISOString().slice(0, 16);
+} //[cite: 1]
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+} //[cite: 1]
+
+function entryDate_(entry) {
+  if (!entry) return '';
+  const dt = entry['Start Date/time'] || '';
+  return dt.slice(0, 10);
+} //[cite: 1]
+
+function entryDetail_(entry) {
+  if (!entry) return '';
+  if (entry.Type === 'Bottle Feed') {
+    const vol = entry['[Bottle Feed] Volume'] || entry['[Bottle Feed] Formula Volume'] || '';
+    const unit = entry['[Bottle Feed] Volume Unit'] || 'mL';
+    const type = entry['[Bottle Feed] Type'] || '';
+    return `${vol} ${unit}${type ? ' (' + type + ')' : ''}`;
+  }
+  if (entry.Type === 'Diaper') {
+    const t = entry['[Diaper] Type'] || '';
+    const d = entry['[Diaper] Detail'] || '';
+    return t + (d ? ` - ${d}` : '');
+  }
+  if (entry.Type === 'Sleep') {
+    const start = entry['Start Date/time'] || '';
+    const end = entry['[Sleep] End Date/time'] || '';
+    return end ? `${start.slice(11, 16)} - ${end.slice(11, 16)}` : 'Ongoing';
+  }
+  if (entry.Type === 'Solid Feed') {
+    const meal = entry['[Solid Feed] Meal'] || '';
+    const food = entry['[Solid Feed] Food'] || '';
+    return `${meal}${food ? ': ' + food : ''}`;
+  }
+  return '';
+} //[cite: 1]
+
+function entryDetail(entry) { 
+  return entryDetail_(entry); 
+} //[cite: 1]
+
+function dateRange_(endDateStr, days) {
+  const result = [];
+  const end = new Date(endDateStr);
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(end);
+    d.setDate(d.getDate() - i);
+    result.push(localDate(d));
+  }
+  return result;
+} //[cite: 1]
+
+function duration(seconds) {
+  if (!seconds || seconds <= 0) return '0m';
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  return `${mins}m`;
+} //[cite: 1]
+
+function formatTimeEntry(entry) {
+  if (!entry || !entry['Start Date/time']) return '';
+  return entry['Start Date/time'].slice(11, 16);
+} //[cite: 1]
+
+function relativeTime(entry) {
+  if (!entry || !entry['Start Date/time (Epoch)']) return '';
+  const epoch = Number(entry['Start Date/time (Epoch)']);
+  const diffMs = Date.now() - epoch;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+} //[cite: 1]
+
+function latestLabel(type) {
+  return type;
+} //[cite: 1]
+
+function latestValue(latest) {
+  return entryDetail_(latest);
+} //[cite: 1]
+
+function showToast(msg, isError = false) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const toast = document.createElement('div');
+  toast.className = `toast ${isError ? 'error' : ''}`;
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+} //[cite: 1]
+
+==> ./style.css <==
+:root {
+  --bg: #171b2a;
+  --panel: #292e3d;
+  --panel-2: #343b4f;
+  --line: #566073;
+  --text: #ffffff;
+  --muted: #adb5c5;
+  --blue: #5a82b4;
+  --wet: #c8b994;
+  --dirty: #978142;
+
+  /* Header Theme Colors */
+  --feed-color: #f1c550;
+  --sleep-color: #5a82b4;
+  --diaper-color: #c8b994;
+  --nursing-color: #df5e67;
+  --pump-color: #6fb198;
+}
+
+* { box-sizing: border-box; }
+* /* Prevent Safari bounce/banding and match your dark theme */
+html, body {
+  background-color: #111522; /* Match your app's deep background color */
+  overscroll-behavior-y: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Add safe-area padding to the top header so it clears the iOS Dynamic Island/notch */
+header, .app-header, .header-container {
+  padding-top: max(16px, env(safe-area-inset-top));
+}
+body {
+  margin: 0;
+  padding-top: env(safe-area-inset-top);
+  background: #111522;
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+}
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+.hidden { display: none !important; }
+
+/* App Layout & Top Header */
+.app-shell {
+  width: min(100%, 520px);
+  min-height: 100vh;
+  margin: auto;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  position: relative;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 16px 0px;
+  background: rgba(23, 27, 42, .96);
+  backdrop-filter: blur(12px);
+}
+.app-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* Pushes left group and right group apart */
+  width: 100%;
+  padding: 12px 16px;
+  box-sizing: border-box;
+}
+
+.header-left-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.header-right-group {
+  display: flex;
+  align-items: center;
+}
+.eyebrow { color: #8290a6; font-size: 9px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+h1, h2, .highlight-value, .highlight-copy strong, .detail-headline { font-family: 'DM Serif Display', serif; }
+h1 { margin: 0; font-size: 25px; }
+.page { padding: 7px 11px 18px; }
+
+/* Activity Cards */
+.activity-card {
+  margin: 11px 0;
+  overflow: hidden;
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .14);
+}
+.card-header {
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  color: #202535;
+}
+.card-header.feed { background: var(--feed-color); color: #202535; }
+.card-header.sleep { background: var(--sleep-color); color: #ffffff; }
+.card-header.diaper { background: var(--diaper-color); color: #202535; }
+.card-header.nursing { background: var(--nursing-color); color: #ffffff; }
+.card-header.pump { background: var(--pump-color); color: #ffffff; }
+.card-header h2 { margin: 0; font-size: 22px; line-height: 1; }
+
+.add-button {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  color: white;
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 20px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-highlight {
+  width: 100%;
+  min-height: 90px;
+  display: grid;
+  grid-template-columns: 52px 1fr auto;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 13px;
+  border: 0;
+  color: white;
+  background: transparent;
+  text-align: left;
+}
+.activity-icon { font-size: 34px; text-align: center; }
+.highlight-copy strong { display: block; font-size: 17px; font-weight: 400; }
+.highlight-copy small { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); }
+.highlight-value { font-size: 1.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.02em; text-align: right; max-width: 300px}
+.recent-panel { padding: 6px 13px 10px; border-top: 1px solid var(--line); }
+.compact-entry {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  border: 0;
+  border-bottom: 1px solid rgba(86, 96, 115, .35);
+  color: white;
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+}
+.compact-entry span { color: var(--muted); }
+.compact-entry strong { text-align: right; }
+.empty-compact { padding: 7px 0; color: var(--muted); font-size: 11px; }
+.see-all { width: 100%; padding: 9px 0 1px; border: 0; color: white; background: transparent; text-align: left; font-size: 12px; font-weight: 700; }
+
+/* Today Summary Section */
+.today-summary { margin: 13px 0; padding: 14px; border-radius: 17px; background: #232838; }
+.section-heading { display: flex; justify-content: space-between; align-items: center; }
+.section-heading h2 { margin: 0; font-size: 22px; }
+.section-heading span { color: var(--muted); font-size: 11px; }
+.summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
+.summary-grid div { padding: 10px; border-radius: 11px; background: #2d3343; }
+.summary-grid strong, .summary-grid span { display: block; }
+.summary-grid strong { font: 20px 'DM Serif Display', serif; }
+.summary-grid span { color: var(--muted); font-size: 10px; }
+
+/* Fixed Bottom Navigation */
+.bottom-nav, nav, nav.bottom-nav {
+  position: fixed;
+  z-index: 200;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: min(100%, 520px);
+  height: calc(64px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid #50596d;
+  background: var(--panel);
+}
+.bottom-nav button, nav button {
+  border: 0;
+  color: #858d9d;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 11px;
+}
+.bottom-nav button.active, nav button.active { color: #6c9bd0; }
+.bottom-nav button span, nav button span { font-size: 20px; }
+
+/* Full Screen Loading Overlay */
+.loading {
+  position: fixed;
+  z-index: 9999;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(23, 27, 42, 0.95);
+  backdrop-filter: blur(6px);
+  color: white;
+  font-family: 'DM Serif Display', serif;
+  font-size: 26px;
+}
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Detail Views & Charts */
+.detail-header { display: grid; grid-template-columns: 39px 1fr 58px; align-items: center; gap: 6px; }
+.detail-header button, .detail-header select { padding: 7px; border: 1px solid var(--line); border-radius: 9px; color: white; background: var(--panel); }
+.detail-header h2 { margin: 0; text-align: center; font: 19px 'DM Sans', sans-serif; }
+.type-filter { display: flex; gap: 5px; margin: 11px 0; overflow: auto; scrollbar-width: none; }
+.type-filter button { flex: none; padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel); font-size: 10px; }
+.type-filter button.active { color: white; background: var(--blue); }
+.detail-headline { padding: 10px 0 13px; text-align: center; font-size: 22px; }
+.view-tabs { display: grid; grid-template-columns: repeat(3, 1fr); padding: 3px; border-radius: 11px; background: var(--panel); }
+.view-tabs button { padding: 7px; border: 0; border-radius: 8px; color: white; background: transparent; font-weight: 700; font-size: 11px; }
+.view-tabs button.active { background: #626d83; }
+.date-scroller { display: flex; gap: 1px; margin: 10px -11px 0; overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; }
+.date-scroller button { flex: 0 0 50px; padding: 7px 2px; border: 0; color: white; background: var(--panel); scroll-snap-align: center; }
+.date-scroller button.active { background: var(--blue); }
+.date-scroller small, .date-scroller strong { display: block; font-size: 10px; }
+.date-scroller small { margin-bottom: 4px; }
+.calendar-viewport, .graph-viewport { margin: 0 -11px; overflow-x: auto; }
+.calendar-canvas { --day-width: 50px; position: relative; width: max(100%, calc(var(--days) * var(--day-width) + 40px)); height: 430px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(12.5% - 1px), rgba(124, 136, 158, .38) 12.5%); }
+.time-axis { position: absolute; width: 40px; inset: 0 auto 0 0; background: #272d3c; }
+.time-axis span { position: absolute; right: 5px; transform: translateY(-50%); font-size: 8px; }
+.day-columns { position: absolute; left: 40px; right: 0; top: 0; bottom: 0; display: grid; grid-template-columns: repeat(var(--days), 50px); }
+.day-column { position: relative; border-left: 1px solid rgba(86, 96, 115, .18); }
+.event-mark { position: absolute; left: 14%; width: 72%; height: 6px; border: 0; border-radius: 3px; background: var(--wet); }
+.event-mark.dirty { background: var(--dirty); }
+.sleep-block { position: absolute; left: 17%; width: 66%; min-height: 4px; border: 0; border-radius: 4px; background: #88c8da; }
+.bar-chart { --day-width: 50px; width: max(100%, calc(var(--days) * var(--day-width))); height: 330px; display: grid; grid-template-columns: repeat(var(--days), 50px); align-items: end; padding: 30px 0 18px; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to bottom, transparent 0, transparent calc(25% - 1px), rgba(124, 136, 158, .35) 25%); }
+.bar-column { height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 0; }
+.bar-column > span { height: 17px; color: var(--muted); font-size: 8px; }
+.single-bar, .stacked-bar { width: 66%; min-height: 2px; display: flex; flex-direction: column; overflow: hidden; border-radius: 3px 3px 0 0; background: var(--wet); }
+.stacked-bar .first, .legend .first { background: var(--wet); }
+.stacked-bar .second, .legend .second { background: var(--dirty); }
+.bar-column small { margin-top: 5px; color: var(--muted); font-size: 8px; }
+.legend { display: flex; justify-content: center; gap: 20px; padding: 14px 0; font-size: 11px; }
+.legend span { display: flex; align-items: center; gap: 5px; }
+.legend i { width: 13px; height: 13px; border-radius: 4px; }
+.entries-list { padding-top: 8px; }
+.entry-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 9px; padding: 11px 3px; border: 0; border-bottom: 1px solid #303648; color: white; background: transparent; text-align: left; }
+.entry-row strong, .entry-row small { display: block; }
+.entry-row small { margin-top: 3px; color: var(--muted); }
+.entry-row b { font-size: 20px; color: var(--muted); }
+.empty-state { padding: 45px 0; color: var(--muted); text-align: center; }
+
+.toast { position: fixed; z-index: 1000; left: 13px; right: 13px; bottom: 80px; max-width: 490px; margin: auto; padding: 11px 14px; border-radius: 11px; color: #182033; background: white; font-weight: 700; }
+.toast.error { color: #991b1b; background: #fee2e2; }
+
+/* Bottom Sheet Modal Overlay */
+.editor-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+}
+
+.editor {
+  width: min(100%, 520px);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: #232838;
+  border-top-left-radius: 20px;
+  border-top-right-radius: 20px;
+  padding: 0 16px calc(24px + env(safe-area-inset-bottom)) 16px;
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5);
+  animation: slideUpSheet 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sheet-handle {
+  width: 38px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+  margin: 10px auto 12px auto;
+}
+
+/* Modal Headers */
+.editor-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-radius: 12px;
+  margin-bottom: 12px;
+  color: #232838
+}
+.editor-header.feed { background: var(--feed-color); color: #171b2a; }
+.editor-header.sleep { background: var(--sleep-color); color: #ffffff; }
+.editor-header.diaper { background: var(--diaper-color); color: #171b2a; }
+.editor-header.nursing { background: var(--nursing-color); color: #ffffff; }
+.editor-header.pump { background: var(--pump-color); color: #ffffff; }
+
+.editor-header h2 {
+  margin: 0;
+  font-family: 'DM Serif Display', serif;
+  font-size: 19px;
+  font-weight: 700;
+  color: inherit;
+}
+
+.editor-header button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 4px;
+}
+.editor-header button.close-btn { font-size: 18px; line-height: 1; }
+
+.editor-body { padding: 4px 0; }
+
+.editor-row {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(86, 96, 115, 0.35);
+}
+
+.editor-row label {
+  font-family: 'DM Serif Display', serif;
+  font-size: 15px;
+  color: #ffffff;
+}
+
+.editor-row input[type='datetime-local'],
+.editor-row input[type='number'],
+.editor-row select {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #343b4f;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px;
+  text-align: right;
+  color-scheme: dark;
+}
+
+.editor-row input[type='number'] {
+  width: 90px;
+}
+
+/* Segmented Toggle Control Track */
+.segmented {
+  display: flex;
+  background: #343b4f;
+  border-radius: 9px;
+  padding: 3px;
+  gap: 4px;
+}
+
+.segmented button {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #adb5c5;
+  padding: 7px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.segmented button.active {
+  background: var(--blue);
+  color: #ffffff;
+}
+
+/* Sleep Timer Controls */
+.sleep-timer-card {
+  padding: 20px 16px;
+  background: #2b3245;
+  border-radius: 14px;
+  text-align: center;
+  margin: 10px 0 16px;
+}
+
+.timer-display {
+  font-family: 'DM Serif Display', serif;
+  font-size: 40px;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  margin: 8px 0 16px;
+}
+
+.timer-action-btn {
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 14px;
+  color: white;
+  cursor: pointer;
+}
+.timer-action-btn.start { background: var(--blue); }
+.timer-action-btn.stop { background: #df5e67; }
+
+/* Choice Chips */
+.choice-grid {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0 12px;
+}
+.choice-chip {
+  flex: 1;
+  padding: 10px;
+  border: 1px solid var(--blue);
+  border-radius: 10px;
+  color: #8fb4df;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+.choice-chip.active { color: white; background: var(--blue); }
+
+.delete-button {
+  width: 100%;
+  margin: 18px 0 8px;
+  padding: 12px;
+  border: 1px solid #df5e67;
+  border-radius: 10px;
+  color: #ff9ca3;
+  background: transparent;
+  font-weight: 700;
+}
+
+@keyframes slideUpSheet {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@media (max-width: 360px) {
+  .highlight-value { font-size: 28px; }
+  .highlight-copy strong { font-size: 18px; }
+  .activity-icon { font-size: 33px; }
+  .editor-row label { font-size: 14px; }
+}
+.picker-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0 24px;
+}
+
+.picker-option {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 16px;
+  background: var(--panel-2);
+  border: 0;
+  border-radius: 14px;
+  color: #ffffff;
+  font-size: 18px;
+  font-family: 'DM Serif Display', serif;
+  text-align: left;
+}
+
+.picker-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: gray;
+}
+
+.sync-badge.synced .sync-dot { background-color: #2e7d32; }
+.sync-badge.syncing .sync-dot { background-color: #ed6c02; }
+.sync-badge.offline .sync-dot { background-color: #d32f2f; }
+
+/* Calendar Strip Styles */
+.calendar-strip-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Hide scrollbar while allowing scroll */
+.calendar-strip-wrapper::-webkit-scrollbar {
+  display: none;
+}
+
+.calendar-strip {
+  display: flex;
+  gap: 10px;
+  padding: 0 16px;
+}
+
+.calendar-day {
+  flex: 0 0 54px;
+  height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.calendar-day.selected {
+  background: #e8a0bf;
+  color: #121212;
+  font-weight: bold;
+  transform: scale(1.05);
+}
+
+.day-name {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+
+.day-num {
+  font-size: 1.2rem;
+  margin-top: 2px;
+}
+
+/* Filter Chips */
+.filter-chips-wrapper {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+}
+
+.chip {
+  padding: 6px 8px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: transparent;
+  color: inherit;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.chip.active {
+  background: #ffffff;
+  color: #121212;
+  border-color: #ffffff;
+}
+
+/* History Feed Items */
+.history-feed {
+  padding: 8px 16px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.history-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.history-value {
+  font-size: 0.85rem;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Month Header */
+.calendar-header {
+  font-size: 1.1rem;
+  font-weight: 700;
+  padding: 12px 16px 4px 16px;
+  color: #ffffff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Updated Day Card with Month display */
+.calendar-day {
+  flex: 0 0 56px;
+  height: 70px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+
+.day-month {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.day-num {
+  font-size: 1.1rem;
+  font-weight: bold;
+  line-height: 1.1;
+}
+
+.day-name {
+  font-size: 0.7rem;
+  opacity: 0.8;
+}
+
+.card-drawer-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #9ca3af;
+}
+
+.card-drawer-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 12px 16px;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+
+.drawer-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.drawer-item-copy {
+  flex: 1;
+  margin-left: 12px;
+}
+
+.drawer-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.see-all-drawer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 12px 16px;
+  cursor: pointer;
+  color: #9ca3af;
+  font-size: 0.85rem;
+}
+
+.see-all-drawer:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.03);
+}
+.drawer-row-details {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.drawer-text-detail {
+  font-size: 0.9rem;
+  color: #d1d5db;
+}
+
+==> ./index.html <==
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="LittleLog">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#171b2a">
+  <title>LittleLog</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
+  <link href="style.css" rel="stylesheet">
+
+  <!-- Added defer to ensure DOM elements exist before scripts run -->
+  <script src="js/config.js" defer></script>
+  <script src="js/utils.js" defer></script>
+  <script src="js/db-sync.js" defer></script>
+  <script src="js/editor.js" defer></script>
+  <script src="js/views.js" defer></script>
+  <script src="js/trends.js" defer></script>
+  <script src="js/history.js" defer></script>
+  <script src="js/settings.js" defer></script>
+  <script src="js/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="app-header-inner">
+        <!-- Left side: Logo & Baby Name -->
+        <div class="header-left-group">
+          <span style="font-size: 0.75rem; color: #94a3b8; letter-spacing: 0.05em; text-transform: uppercase;">LITTLELOG</span>
+          <h1 style="margin: 0; font-size: 1.5rem; font-weight: 700; color: #fff;">Alicia</h1>
+        </div>
+
+        <!-- Right side: Sync Status Badge -->
+        <div class="header-right-group">
+          <div id="sync-status" class="sync-badge synced" style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #cbd5e1;">
+            <span style="width: 8px; height: 8px; background-color: #4ade80; border-radius: 50%; display: inline-block;"></span>
+            <span id="sync-text">Synced</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="home-page" class="page">
+      <section id="activity-cards"></section>
+      <section id="today-summary" class="today-summary"></section>
+    </main>
+
+    <main id="history-page" class="page hidden"></main>
+    
+    <main id="trends-page" class="page hidden"></main>
+    
+    <main id="settings-page" class="page hidden"></main>
+
+    <nav class="bottom-nav">
+      <!-- Home Tab -->
+      <button type="button" class="active" onclick="showHome(this)">
+        <span>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </span>
+        Home
+      </button>
+
+      <!-- History Tab -->
+      <button type="button" onclick="showHistoryPage(this)">
+        <span>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </span>
+        History
+      </button>
+
+      <!-- Trends Tab -->
+      <button type="button" onclick="showTrendsPage(this)">
+        <span>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+        </span>
+        Trends
+      </button>
+      
+      <!-- Settings Tab -->
+      <button type="button" onclick="showSettingsPage(this)">
+        <span>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </span>
+        Settings
+      </button>
+    </nav>
+  </div>
+
+  <div id="overlay-root"></div>
+  <div id="loading" class="loading hidden">
+    <div class="spinner"></div>
+    <span>Loading…</span>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  
+  <div id="editor-overlay" class="editor-overlay hidden">
+    <div class="editor">
+      <div class="sheet-handle"></div>
+      
+      <!-- Dynamic Color Header -->
+      <div id="editor-header" class="editor-header feed">
+        <button type="button" class="close-btn" onclick="closeEditor()">✕</button>
+        <h2 id="editor-title">New Feed</h2>
+        <button type="button" class="save-btn" onclick="saveEntry()">Save</button>
+      </div>
+
+      <!-- Dynamic Form Body -->
+      <div id="editor-body" class="editor-body">
+        <!-- Injected dynamically via JS based on type -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then((reg) => console.log('Service Worker registered successfully!', reg.scope))
+          .catch((err) => console.error('Service Worker registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
+
+==> ./script.js <==
+// --- Constants & Global State ---
+const TYPES = {
+  'Bottle Feed': { key: 'feed', title: 'Feed', icon: '🍼', color: '#ffd052' },
+  'Diaper': { key: 'diaper', title: 'Diaper', icon: '◒', color: '#f2ecdc' },
+  'Sleep': { key: 'sleep', title: 'Sleep', icon: '☾', color: '#bfe7f3' },
+  'Solid Feed': { key: 'solids', title: 'Solids', icon: '🥣', color: '#e8c6d5' }
+};
+
+const DB_NAME = 'LittleLogLocalDB';
+const DB_VERSION = 1;
+let dbInstance = null;
+let closeOverlayTimer = null;
+
+const state = {
+  profile: '',
+  caregiver: 'Sharat',
+  profiles: [],
+  caregivers: ['Sharat', 'Marianne'],
+  home: null,
+  detailType: 'Bottle Feed',
+  detailTab: 'calendar',
+  days: 7,
+  endDate: localDate(),
+  selectedDate: localDate(),
+  detail: null,
+  sleepTimer: null,
+  loadingCount: 0
+};
+
+// --- App Lifecycle ---
+window.addEventListener('DOMContentLoaded', initialize);
+
+function getApiUrl() {
+  return localStorage.getItem('littlelog-api-url') || '';
+}
+
+async function callApi(action, payload = {}) {
+  const url = getApiUrl();
+  if (!url) throw new Error('Apps Script Web App URL is not configured.');
+
+  const response = await fetch(url, {
+    method: 'POST',
+    body: JSON.stringify({ action, ...payload })
+  });
+
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('API returned non-JSON:', text);
+    throw new Error('Invalid response from Google Apps Script. Check deployment permissions.');
+  }
+}
+
+async function initialize() {
+  const saved = JSON.parse(localStorage.getItem('littlelog-settings') || '{}');
+  state.profile = saved.profile || '';
+  state.caregiver = saved.caregiver || 'Sharat';
+
+  let apiUrl = localStorage.getItem('littlelog-api-url');
+  if (!apiUrl) {
+    apiUrl = prompt('Please enter your Google Apps Script Web App URL:');
+    if (apiUrl && apiUrl.trim()) {
+      localStorage.setItem('littlelog-api-url', apiUrl.trim());
+    } else {
+      showToast('Offline mode: No API URL provided', true);
+      await loadHome();
+      return;
+    }
+  }
+
+  try {
+    dbInstance = await openDatabase();
+    const bootstrap = await callApi('getBootstrap');
+
+    state.profiles = bootstrap?.profiles?.length ? bootstrap.profiles : ['Baby'];
+    state.caregivers = bootstrap?.caregivers || ['Sharat', 'Marianne'];
+
+    if (!state.profiles.includes(state.profile)) state.profile = state.profiles[0];
+    if (!state.caregivers.includes(state.caregiver)) state.caregiver = state.caregivers[0];
+
+    await syncBootstrapToIDB(bootstrap.allRows);
+    await loadHome();
+    setupBackgroundSync();
+  } catch (err) {
+    console.error('Initialization error:', err);
+    showToast('Offline mode active', true);
+    await loadHome();
+  }
+}
+
+// --- IndexedDB Layer ---
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains('entries')) {
+        db.createObjectStore('entries', { keyPath: '_activityKey' });
+      }
+      if (!db.objectStoreNames.contains('sync_queue')) {
+        db.createObjectStore('sync_queue', { keyPath: 'id', autoIncrement: true });
+      }
+    };
+  });
+}
+
+async function syncBootstrapToIDB(rows) {
+  if (!rows || rows.length < 2) return;
+  const headers = rows[0];
+  const tx = dbInstance.transaction('entries', 'readwrite');
+  const store = tx.objectStore('entries');
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const obj = {};
+    headers.forEach((h, idx) => { if (h) obj[h] = row[idx] ?? ''; });
+    if (obj._activityKey) {
+      store.put({ ...obj, _synced: true });
+    }
+  }
+}
+
+async function getAllLocalEntries() {
+  if (!dbInstance) return [];
+  return new Promise((resolve) => {
+    const tx = dbInstance.transaction('entries', 'readonly');
+    const store = tx.objectStore('entries');
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+async function upsertLocalEntry(entry, action = 'create') {
+  if (!dbInstance) return;
+  const tx = dbInstance.transaction(['entries', 'sync_queue'], 'readwrite');
+  entry._synced = false;
+  tx.objectStore('entries').put(entry);
+  tx.objectStore('sync_queue').add({ action, key: entry._activityKey, data: entry, timestamp: Date.now() });
+  tx.oncomplete = () => triggerBackgroundSync();
+}
+
+async function deleteLocalEntry(key) {
+  if (!dbInstance) return;
+  const tx = dbInstance.transaction(['entries', 'sync_queue'], 'readwrite');
+  tx.objectStore('entries').delete(key);
+  tx.objectStore('sync_queue').add({ action: 'delete', key, timestamp: Date.now() });
+  tx.oncomplete = () => triggerBackgroundSync();
+}
+
+// --- Background Sync Engine ---
+function setupBackgroundSync() {
+  window.addEventListener('online', triggerBackgroundSync);
+  setInterval(triggerBackgroundSync, 45000);
+}
+
+async function triggerBackgroundSync() {
+  if (!navigator.onLine || !dbInstance) return;
+
+  const tx = dbInstance.transaction('sync_queue', 'readonly');
+  const store = tx.objectStore('sync_queue');
+  const req = store.getAll();
+
+  req.onsuccess = async () => {
+    const queue = req.result;
+    if (!queue || queue.length === 0) return;
+
+    try {
+      await callApi('batchSync', { mutations: queue });
+      const clearTx = dbInstance.transaction('sync_queue', 'readwrite');
+      const clearStore = clearTx.objectStore('sync_queue');
+      queue.forEach(item => clearStore.delete(item.id));
+    } catch (err) {
+      console.warn('Background sync deferred:', err);
+    }
+  };
+}
+
+// --- Aggregation & Data Loading ---
+async function loadHome() {
+  clearInterval(state.sleepTimer);
+  const profileTitleEl = document.getElementById('profile-title');
+  if (profileTitleEl) profileTitleEl.textContent = state.profile;
+
+  const entries = await getAllLocalEntries();
+  const profileEntries = entries
+    .filter(e => e.Type && e._activityKey && (!state.profile || e['Profile Name'] === state.profile))
+    .sort((a, b) => Number(b['Start Date/time (Epoch)'] || 0) - Number(a['Start Date/time (Epoch)'] || 0));
+
+  const todayStr = localDate();
+  const recent = type => profileEntries.filter(e => e.Type === type).slice(0, 3);
+  const todayEntries = profileEntries.filter(e => entryDate_(e) === todayStr);
+  const activeSleep = profileEntries.find(e => e.Type === 'Sleep' && !e['[Sleep] End Date/time (Epoch)']) || null;
+
+  state.home = {
+    recent: {
+      feed: recent('Bottle Feed'),
+      diaper: recent('Diaper'),
+      sleep: recent('Sleep'),
+      solids: recent('Solid Feed')
+    },
+    activeSleep,
+    today: {
+      feedCount: todayEntries.filter(e => e.Type === 'Bottle Feed').length,
+      feedMl: Math.round(todayEntries.filter(e => e.Type === 'Bottle Feed').reduce((sum, e) => sum + bottleMl_(e), 0)),
+      diaperCount: todayEntries.filter(e => e.Type === 'Diaper').length,
+      solidsCount: todayEntries.filter(e => e.Type === 'Solid Feed').length,
+      sleepSeconds: profileEntries
+        .filter(e => e.Type === 'Sleep' && e['[Sleep] End Date/time (Epoch)'])
+        .reduce((sum, e) => sum + sleepOverlap_(e, todayStr), 0)
+    }
+  };
+
+  renderHome();
+  startSleepClock();
+}
+
+async function loadDetail() {
+  const entries = await getAllLocalEntries();
+  const profileEntries = entries
+    .filter(e => e.Type && e._activityKey && (!state.profile || e['Profile Name'] === state.profile))
+    .sort((a, b) => Number(b['Start Date/time (Epoch)'] || 0) - Number(a['Start Date/time (Epoch)'] || 0));
+
+  const days = Number(state.days) || 7;
+  const dates = dateRange_(state.endDate, days);
+  const type = state.detailType;
+
+  const filtered = profileEntries.filter(entry => {
+    if (entry.Type !== type && !(type === 'Sleep' && entry.Type === 'Sleep')) return false;
+    const d = entryDate_(entry);
+    return d >= dates[0] && d <= state.endDate;
+  });
+
+  const allSleep = type === 'Sleep' ? profileEntries.filter(e => e.Type === 'Sleep') : [];
+  const buckets = dates.map(date => summarizeDay_(date, type, filtered.filter(e => entryDate_(e) === date), allSleep));
+
+  const average = buckets.reduce((sum, b) => sum + b.total, 0) / days;
+  let headline = `${round_(average, 1)} per day`;
+  if (type === 'Bottle Feed') headline = `${Math.round(average)} mL per day`;
+  if (type === 'Diaper') headline = `${round_(average, 1)} diapers per day`;
+  if (type === 'Sleep') headline = `${formatDuration_(average)} sleep per day`;
+  if (type === 'Solid Feed') headline = `${round_(average, 1)} meals per day`;
+
+  state.detail = { type, days, endDate: state.endDate, dates, headline, buckets, entries: filtered };
+  renderDetail();
+}
+
+// --- Home UI Rendering ---
+function renderHome() {
+  const types = ['Bottle Feed', 'Diaper', 'Sleep', 'Solid Feed'];
+  const cardsContainer = document.getElementById('activity-cards');
+  if (cardsContainer) {
+    cardsContainer.innerHTML = types.map(renderCard).join('');
+  }
+
+  const today = state.home.today;
+  const todaySummaryEl = document.getElementById('today-summary');
+  if (todaySummaryEl) {
+    todaySummaryEl.innerHTML = `
+      <div class="section-heading"><h2>Today</h2><span>${formatDate(localDate())}</span></div>
+      <div class="summary-grid">
+        <div><strong>${duration(today.sleepSeconds)}</strong><span>Sleep</span></div>
+        <div><strong>${today.feedCount}</strong><span>Feeds · ${today.feedMl} mL</span></div>
+        <div><strong>${today.diaperCount}</strong><span>Diapers</span></div>
+        <div><strong>${today.solidsCount}</strong><span>Meals</span></div>
+      </div>`;
+  }
+}
+
+function renderCard(type) {
+  const config = TYPES[type];
+  const recent = state.home.recent[config.key] || [];
+  if (type === 'Sleep' && state.home.activeSleep) return renderActiveSleep(config, recent);
+
+  const latest = recent[0];
+  const highlightAction = latest ? `openEditorByKey('${latest._activityKey}')` : (type === 'Bottle Feed' ? "openFeedActionSheet()" : `openEditor('${type}')`);
+  const addAction = type === 'Bottle Feed' ? "openFeedActionSheet()" : `openEditor('${type}')`;
+
+  return `
+    <article class="activity-card">
+      <div class="card-header" style="background:${config.color}">
+        <h2>${config.title}</h2>
+        <button class="add-button" onclick="${addAction}">+</button>
+      </div>
+      <button class="card-highlight" onclick="${highlightAction}">
+        <span class="activity-icon">${config.icon}</span>
+        <span class="highlight-copy">
+          <strong>${latest ? latestLabel(type) : 'No entries yet'}</strong>
+          <small>${latest ? relativeTime(latest) : 'Tap to add one'}</small>
+        </span>
+        <span class="highlight-value">${latest ? latestValue(latest) : '—'}</span>
+      </button>
+      <div class="recent-panel">
+        ${recent.slice(1).map(compactEntry).join('') || '<div class="empty-compact">No earlier entries</div>'}
+        <button class="see-all" onclick="openDetail('${type}')">See all →</button>
+      </div>
+    </article>`;
+}
+
+function compactEntry(entry) {
+  return `<button class="compact-entry" onclick="openEditorByKey('${entry._activityKey}')"><span>${formatTimeEntry(entry)}</span><strong>${escapeHtml(entryDetail(entry))}</strong></button>`;
+}
+
+function renderActiveSleep(config, recent) {
+  const active = state.home.activeSleep;
+  return `
+    <article class="activity-card">
+      <div class="card-header" style="background:${config.color}"><h2>Sleep</h2><span class="live-badge">LIVE</span></div>
+      <div class="active-sleep">
+        <span class="activity-icon">☾</span>
+        <div><strong>Sleeping</strong><small>Started ${formatTimeEntry(active)}</small></div>
+        <b id="sleep-clock">00:00:00</b>
+      </div>
+      <button class="sleep-stop" onclick="endActiveSleep()">End Sleep</button>
+      <div class="recent-panel">
+        ${recent.filter(e => e._activityKey !== active._activityKey).slice(0, 2).map(compactEntry).join('')}
+        <button class="see-all" onclick="openDetail('Sleep')">See all →</button>
+      </div>
+    </article>`;
+}
+
+// --- Detail Screen UI Rendering ---
+function renderDetail() {
+  const detail = state.detail;
+  if (!detail) return;
+
+  const typeConfig = TYPES[detail.type] || { title: detail.type, icon: '📋', color: '#f2ecdc' };
+  const pageEl = document.getElementById('detail-page');
+  if (!pageEl) return;
+
+  pageEl.innerHTML = `
+    <div class="detail-header" style="background:${typeConfig.color}">
+      <button onclick="showHome()">← Back</button>
+      <h2>${typeConfig.icon} ${typeConfig.title}</h2>
+      <button onclick="openEditor('${detail.type}')">+</button>
+    </div>
+    <div class="detail-sub-banner">
+      <div class="detail-headline"><strong>${escapeHtml(detail.headline)}</strong></div>
+      <div class="detail-tabs">
+        <button class="${state.detailTab === 'calendar' ? 'active' : ''}" onclick="switchDetailTab('calendar')">Calendar</button>
+        <button class="${state.detailTab === 'list' ? 'active' : ''}" onclick="switchDetailTab('list')">List</button>
+      </div>
+    </div>
+    <div class="detail-content">
+      ${state.detailTab === 'calendar' ? renderDetailCalendar(detail) : renderDetailList(detail)}
+    </div>`;
+}
+
+function switchDetailTab(tab) {
+  state.detailTab = tab;
+  renderDetail();
+}
+
+function renderDetailCalendar(detail) {
+  return `
+    <div class="calendar-view">
+      ${detail.buckets.slice().reverse().map(b => `
+        <div class="calendar-day-row">
+          <div class="calendar-day-meta">
+            <strong>${formatDate(b.date)}</strong>
+            <span>${b.total ? `${Math.round(b.total)}${detail.type === 'Bottle Feed' ? ' mL' : ''}` : '0'}</span>
+          </div>
+          <div class="calendar-day-chips">
+            ${b.instances.length ? b.instances.map(inst => `
+              <button class="calendar-chip" onclick="openEditorByKey('${inst.key}')">
+                <small>${inst.start.slice(11, 16)}</small>
+                <span>${escapeHtml(inst.detail)}</span>
+              </button>
+            `).join('') : '<span class="empty-chip-slot">—</span>'}
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+function renderDetailList(detail) {
+  return `
+    <div class="list-view">
+      ${detail.entries.length ? detail.entries.map(entry => `
+        <button class="list-row-item" onclick="openEditorByKey('${entry._activityKey}')">
+          <div class="list-row-left">
+            <strong>${escapeHtml(entry['Start Date/time'])}</strong>
+            <small>${escapeHtml(entry['Created By Caregiver'] || '')}</small>
+          </div>
+          <div class="list-row-right">
+            <span>${escapeHtml(entryDetail_(entry))}</span>
+          </div>
+        </button>
+      `).join('') : '<div class="empty-instance">No entries found</div>'}
+    </div>`;
+}
+
+// --- Bottom Sheet & Action Menu Engine ---
+function openFeedActionSheet() {
+  const content = `
+    <div class="sheet-options">
+      <button class="sheet-option-btn" onclick="openEditor('Bottle Feed')">
+        <span style="font-size: 1.4rem;">🍼</span>
+        <div>
+          <strong>Bottle Feed</strong>
+          <div style="font-size:0.8rem; color:#8e8e93;">Log formula or breast milk volume</div>
+        </div>
+      </button>
+      <button class="sheet-option-btn" onclick="openEditor('Solid Feed')">
+        <span style="font-size: 1.4rem;">🥣</span>
+        <div>
+          <strong>Solids</strong>
+          <div style="font-size:0.8rem; color:#8e8e93;">Log breakfast, lunch, or meal items</div>
+        </div>
+      </button>
+    </div>
+  `;
+  showBottomSheet('Choose Feed Type', content, false);
+}
+
+function openEditor(type, existingEntry = null) {
+  const isEdit = !!existingEntry;
+  const config = TYPES[type] || { title: type, color: '#f2ecdc' };
+  const now = new Date();
+  
+  const startVal = existingEntry && existingEntry['Start Date/time'] 
+    ? existingEntry['Start Date/time'].slice(0, 16).replace(' ', 'T') 
+    : formatDateTimeLocal_(now);
+    
+  const key = existingEntry ? existingEntry._activityKey : '';
+
+  const content = `
+    <div id="editor-fields">
+      ${type === 'Sleep' ? renderSleepTimerHero(existingEntry) : ''}
+      
+      ${editorRow('Start Time', `<input id="edit-start" type="datetime-local" value="${startVal}">`)}
+      
+      ${editorSpecificFields(type, existingEntry)}
+      
+      ${isEdit ? `<button class="delete-button" onclick="deleteCurrent('${key}')">Delete Entry</button>` : ''}
+    </div>
+  `;
+
+  showBottomSheet(
+    `${isEdit ? 'Edit' : 'New'} ${config.title}`, 
+    content, 
+    true, 
+    () => saveEditor(type, key)
+  );
+}
+
+function showBottomSheet(title, bodyHtml, showSaveBtn = true, onSave = null) {
+  if (closeOverlayTimer) {
+    clearTimeout(closeOverlayTimer);
+    closeOverlayTimer = null;
+  }
+
+  let root = document.getElementById('overlay-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'overlay-root';
+    document.body.appendChild(root);
+  }
+
+  root.innerHTML = `
+    <div class="sheet-overlay" id="sheet-overlay" onclick="handleBackdropClick(event)">
+      <div class="bottom-sheet" onclick="event.stopPropagation()">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <button class="btn-cancel" onclick="closeOverlay()">Cancel</button>
+          <h2>${title}</h2>
+          ${showSaveBtn ? `<button class="btn-save" id="sheet-save-btn">Save</button>` : '<div style="width:40px;"></div>'}
+        </div>
+        <div class="sheet-body">
+          ${bodyHtml}
+        </div>
+      </div>
+    </div>
+  `;
+
+  if (showSaveBtn && onSave) {
+    document.getElementById('sheet-save-btn').onclick = onSave;
+  }
+
+  requestAnimationFrame(() => {
+    document.getElementById('sheet-overlay')?.classList.add('active');
+  });
+}
+
+function closeOverlay() {
+  const overlay = document.getElementById('sheet-overlay');
+  if (overlay) {
+    overlay.classList.remove('active');
+    if (closeOverlayTimer) clearTimeout(closeOverlayTimer);
+    closeOverlayTimer = setTimeout(() => {
+      const root = document.getElementById('overlay-root');
+      if (root) root.innerHTML = '';
+      closeOverlayTimer = null;
+    }, 250);
+  }
+}
+
+function handleBackdropClick(e) {
+  if (e.target.id === 'sheet-overlay') closeOverlay();
+}
+
+// --- Specific Field Renderers ---
+function editorRow(label, content) {
+  return `<div class="editor-row"><label>${label}</label><div>${content}</div></div>`;
+}
+
+function editorSpecificFields(type, e) {
+  if (type === 'Bottle Feed') {
+    const vol = e ? (e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || '') : '';
+    const unit = e ? (e['[Bottle Feed] Volume Unit'] || 'mL') : 'mL';
+    const feedType = e ? (e['[Bottle Feed] Type'] || 'Formula') : 'Formula';
+    return `
+      ${editorRow('Volume', `<input id="edit-volume" type="number" value="${vol}" placeholder="0" step="5">`)}
+      ${editorRow('Unit', segmentedChoices('feed-unit', ['mL', 'oz'], unit, 'chooseFeedUnit'))}
+      ${editorRow('Type', segmentedChoices('feed-type', ['Formula', 'Breast Milk', 'Mixed'], feedType, 'chooseFeedType'))}
+    `;
+  }
+  if (type === 'Diaper') {
+    const diaperType = e ? (e['[Diaper] Type'] || 'Wet') : 'Wet';
+    const detail = e ? (e['[Diaper] Detail'] || '') : '';
+    return `
+      ${editorRow('Type', segmentedChoices('diaper-type', ['Wet', 'Dirty', 'Both', 'Dry'], diaperType, 'chooseDiaperType'))}
+      ${editorRow('Note', `<input id="edit-diaper-detail" value="${escapeHtml(detail)}" placeholder="e.g. blowout, rash cream">`)}
+    `;
+  }
+  if (type === 'Sleep') {
+    const endVal = e && e['[Sleep] End Date/time'] ? e['[Sleep] End Date/time'].slice(0, 16).replace(' ', 'T') : '';
+    return `
+      ${editorRow('End Time', `<input id="edit-sleep-end" type="datetime-local" value="${endVal}">`)}
+    `;
+  }
+  if (type === 'Solid Feed') {
+    const meal = e ? (e['[Solid Feed] Meal'] || 'Breakfast') : 'Breakfast';
+    const food = e ? (e['[Solid Feed] Food'] || '') : '';
+    return `
+      ${editorRow('Meal', segmentedChoices('solid-meal', ['Breakfast', 'Lunch', 'Dinner', 'Snack'], meal, 'chooseSolidMeal'))}
+      ${editorRow('Food', `<input id="edit-solid-food" value="${escapeHtml(food)}" placeholder="e.g. mashed banana, oatmeal">`)}
+    `;
+  }
+  return '';
+}
+
+function renderSleepTimerHero(e) {
+  const active = state.home?.activeSleep;
+  if (!e && active) {
+    return `
+      <div class="timer-hero">
+        <div class="timer-display" id="sheet-sleep-clock">00:00:00</div>
+        <button type="button" class="timer-btn" style="background:#ff453a; color:#fff;" onclick="endActiveSleep()">Stop & Save Sleep</button>
+      </div>
+    `;
+  }
+  return `
+    <div class="timer-hero">
+      <div class="timer-display">0H 0M</div>
+      <button type="button" class="timer-btn" onclick="startSleepNow()">Start Sleep Timer</button>
+    </div>
+  `;
+}
+
+// --- Segmented Control Component Helpers ---
+function segmentedChoices(name, options, selected, callbackName) {
+  return `
+    <div class="segmented" data-group="${name}">
+      ${options.map(opt => `
+        <button type="button" class="${opt === selected ? 'active' : ''}" onclick="${callbackName}('${opt}', this)">${opt}</button>
+      `).join('')}
+    </div>
+  `;
+}
+
+function chooseFeedUnit(val, btn) { selectSegment(btn); }
+function chooseFeedType(val, btn) { selectSegment(btn); }
+function chooseDiaperType(val, btn) { selectSegment(btn); }
+function chooseSolidMeal(val, btn) { selectSegment(btn); }
+function chooseCaregiver(val, btn) { 
+  selectSegment(btn); 
+  const input = document.getElementById('setting-caregiver');
+  if (input) input.value = val;
+}
+
+function selectSegment(btn) {
+  const group = btn.parentElement;
+  group.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function getSelectedSegment(groupName) {
+  const group = document.querySelector(`[data-group="${groupName}"]`);
+  const active = group?.querySelector('button.active');
+  return active ? active.textContent.trim() : '';
+}
+
+// --- Field Saver Processors ---
+function saveFeedFields(payload) {
+  payload['[Bottle Feed] Volume'] = document.getElementById('edit-volume')?.value || '';
+  payload['[Bottle Feed] Volume Unit'] = getSelectedSegment('feed-unit');
+  payload['[Bottle Feed] Type'] = getSelectedSegment('feed-type');
+}
+
+function saveDiaperFields(payload) {
+  payload['[Diaper] Type'] = getSelectedSegment('diaper-type');
+  payload['[Diaper] Detail'] = document.getElementById('edit-diaper-detail')?.value || '';
+}
+
+function saveSleepFields(payload, startStr) {
+  const endStr = document.getElementById('edit-sleep-end')?.value;
+  if (endStr) {
+    const startEpoch = new Date(startStr).getTime();
+    const endEpoch = new Date(endStr).getTime();
+    payload['[Sleep] End Date/time'] = formatDateTimeString(new Date(endEpoch));
+    payload['[Sleep] End Date/time (Epoch)'] = endEpoch;
+    payload['[Sleep] Duration (Seconds)'] = Math.max(0, Math.floor((endEpoch - startEpoch) / 1000));
+  }
+}
+
+function saveSolidFields(payload) {
+  payload['[Solid Feed] Meal'] = getSelectedSegment('solid-meal');
+  payload['[Solid Feed] Food'] = document.getElementById('edit-solid-food')?.value || '';
+}
+
+function commonPayload(type, startStr) {
+  const startDate = new Date(startStr);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return {
+    Type: type,
+    'Profile Name': state.profile,
+    'Start Date/time': formatDateTimeString(startDate),
+    'Start Date/time (Epoch)': startDate.getTime(),
+    'Created By Caregiver': state.caregiver,
+    'Last Updated By Caregiver': state.caregiver,
+    'Time Zone': zone
+  };
+}
+
+function formatDateTimeLocal_(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// --- Form Actions & Timers ---
+async function startSleepNow() {
+  const now = new Date();
+  const payload = commonPayload('Sleep', now.toISOString());
+  payload._activityKey = 'act_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+  
+  await upsertLocalEntry(payload, 'create');
+  closeOverlay();
+  showToast('Sleep timer started');
+  await loadHome();
+}
+
+async function endActiveSleep() {
+  const active = state.home?.activeSleep;
+  if (!active) return;
+  const now = new Date();
+  const startEpoch = Number(active['Start Date/time (Epoch)']);
+
+  active['[Sleep] End Date/time'] = formatDateTimeString(now);
+  active['[Sleep] End Date/time (Epoch)'] = now.getTime();
+  active['[Sleep] Duration (Seconds)'] = Math.max(0, Math.floor((now.getTime() - startEpoch) / 1000));
+  active['Last Updated By Caregiver'] = state.caregiver;
+
+  await upsertLocalEntry(active, 'update');
+  closeOverlay();
+  showToast('Sleep saved');
+  await loadHome();
+}
+
+async function openEditorByKey(key) {
+  const entries = await getAllLocalEntries();
+  const entry = entries.find(e => e._activityKey === key);
+  if (entry) openEditor(entry.Type, entry);
+}
+
+async function saveEditor(type, key) {
+  const startInput = document.getElementById('edit-start');
+  const startStr = startInput ? startInput.value : '';
+  if (!startStr) {
+    showToast('Start time is required', true);
+    return;
+  }
+
+  const payload = commonPayload(type, startStr);
+
+  if (type === 'Bottle Feed') saveFeedFields(payload);
+  else if (type === 'Diaper') saveDiaperFields(payload);
+  else if (type === 'Sleep') saveSleepFields(payload, startStr);
+  else if (type === 'Solid Feed') saveSolidFields(payload);
+
+  const action = key ? 'update' : 'create';
+  const activityKey = key || 'act_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+  payload._activityKey = activityKey;
+
+  try {
+    await upsertLocalEntry(payload, action);
+    closeOverlay();
+    showToast(key ? 'Updated' : 'Saved');
+    if (state.detail) loadDetail();
+    await loadHome();
+  } catch (err) {
+    console.error('Save failed:', err);
+    showToast('Failed to save entry', true);
+  }
+}
+
+async function deleteCurrent(key) {
+  if (!confirm('Are you sure you want to delete this entry?')) return;
+  try {
+    await deleteLocalEntry(key);
+    closeOverlay();
+    if (state.detail) loadDetail();
+    await loadHome();
+    showToast('Deleted entry');
+  } catch (err) {
+    console.error('Delete failed:', err);
+    showToast('Failed to delete entry', true);
+  }
+}
+
+// --- Navigation & Settings ---
+function openDetail(type, navButton) {
+  state.detailType = type;
+  state.selectedDate = state.endDate;
+  activateNav(navButton || document.querySelectorAll('.bottom-nav button')[1]);
+  document.getElementById('home-page').classList.add('hidden');
+  document.getElementById('detail-page').classList.remove('hidden');
+  loadDetail();
+}
+
+function showHome(navButton) {
+  document.getElementById('detail-page').classList.add('hidden');
+  document.getElementById('home-page').classList.remove('hidden');
+  activateNav(navButton || document.querySelector('.bottom-nav button'));
+  state.detail = null;
+  loadHome();
+}
+
+function openSettings(navButton) {
+  activateNav(navButton || document.querySelectorAll('.bottom-nav button')[2]);
+  
+  const content = `
+    <div style="padding-bottom: 10px;">
+      <input id="setting-original-name" type="hidden" value="${escapeHtml(state.profile)}">
+      ${editorRow('Name', `<input id="setting-name" type="text" value="${escapeHtml(state.profile)}">`)}
+      <input id="setting-caregiver" type="hidden" value="${escapeHtml(state.caregiver)}">
+      <div style="margin: 16px 0 8px; font-size: 0.825rem; color: #a1a1a6; text-transform: uppercase;">Caregiver</div>
+      ${segmentedChoices('caregiver', state.caregivers, state.caregiver, 'chooseCaregiver')}
+    </div>
+  `;
+
+  showBottomSheet('Settings', content, true, saveSettings);
+}
+
+function saveSettings() {
+  const nameInput = document.getElementById('setting-name');
+  if (nameInput) state.profile = nameInput.value.trim() || state.profile;
+  localStorage.setItem('littlelog-settings', JSON.stringify({ profile: state.profile, caregiver: state.caregiver }));
+  closeOverlay();
+  showHome();
+}
+
+function activateNav(b) {
+  document.querySelectorAll('.bottom-nav button').forEach(i => i.classList.remove('active'));
+  if (b) b.classList.add('active');
+}
+
+// --- Data & Formatting Utilities ---
+function summarizeDay_(date, type, entries, allSleep) {
+  if (type === 'Bottle Feed') {
+    let formula = 0, breastMilk = 0;
+    entries.forEach(entry => {
+      const fVal = volumeMl_(entry['[Bottle Feed] Formula Volume'], entry['[Bottle Feed] Formula Volume Unit']);
+      const bVal = volumeMl_(entry['[Bottle Feed] Breast Milk Volume'], entry['[Bottle Feed] Breast Milk Volume Unit']);
+      if (fVal || bVal) { formula += fVal; breastMilk += bVal; } 
+      else { formula += bottleMl_(entry); }
+    });
+    return { date, total: formula + breastMilk, formula, breastMilk, instances: entries.map(instance_) };
+  }
+  if (type === 'Diaper') {
+    const wet = entries.filter(e => ['Wet', 'Both'].includes(e['[Diaper] Type'])).length;
+    const dirty = entries.filter(e => ['Dirty', 'Both'].includes(e['[Diaper] Type'])).length;
+    return { date, total: entries.length, wet, dirty, instances: entries.map(instance_) };
+  }
+  if (type === 'Sleep') {
+    const matching = allSleep.filter(e => sleepOverlap_(e, date) > 0);
+    return { date, total: matching.reduce((sum, e) => sum + sleepOverlap_(e, date), 0), instances: matching.map(instance_) };
+  }
+  return { date, total: entries.length, instances: entries.map(instance_) };
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function instance_(entry) {
+  return {
+    key: entry._activityKey,
+    start: entry['Start Date/time'],
+    startEpoch: Number(entry['Start Date/time (Epoch)']) || 0,
+    end: entry['[Sleep] End Date/time'] || '',
+    endEpoch: Number(entry['[Sleep] End Date/time (Epoch)']) || 0,
+    detail: entryDetail_(entry)
+  };
+}
+
+function entryDetail(entry) { return entryDetail_(entry); }
+
+function entryDetail_(entry) {
+  if (entry.Type === 'Bottle Feed') return `${Math.round(bottleMl_(entry))} mL ${entry['[Bottle Feed] Type'] || ''}`;
+  if (entry.Type === 'Diaper') {
+    const t = entry['[Diaper] Type'] || 'Diaper';
+    const d = entry['[Diaper] Detail'] || '';
+    return d ? `${t}: ${d}` : `${t} diaper`;
+  }
+  if (entry.Type === 'Sleep') return entry['[Sleep] End Date/time (Epoch)'] ? formatDuration_(entry['[Sleep] Duration (Seconds)']) : 'Timer running';
+  return `${entry['[Solid Feed] Meal'] || ''} ${entry['[Solid Feed] Food'] || ''}`.trim();
+}
+
+function entryDate_(entry) {
+  const m = String(entry['Start Date/time'] || '').match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : '';
+}
+
+function volumeMl_(v, u) {
+  const n = Number(v) || 0;
+  return String(u).toUpperCase() === 'OZ' ? n * 29.5735 : n;
+}
+
+function bottleMl_(e) {
+  const gen = volumeMl_(e['[Bottle Feed] Volume'], e['[Bottle Feed] Volume Unit']);
+  if (gen) return gen;
+  return volumeMl_(e['[Bottle Feed] Formula Volume'], e['[Bottle Feed] Formula Volume Unit']) + volumeMl_(e['[Bottle Feed] Breast Milk Volume'], e['[Bottle Feed] Breast Milk Volume Unit']);
+}
+
+function dateRange_(endDate, days) {
+  const p = endDate.split('-').map(Number);
+  const dates = [];
+  for (let o = days - 1; o >= 0; o--) {
+    const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] - o));
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+function sleepOverlap_(entry, date) {
+  const start = Number(entry['Start Date/time (Epoch)']);
+  const end = Number(entry['[Sleep] End Date/time (Epoch)']);
+  if (!start || !end) return 0;
+  const parts = date.split('-').map(Number);
+  const from = Date.UTC(parts[0], parts[1] - 1, parts[2]);
+  const to = from + 86400000;
+  return Math.max(0, Math.floor((Math.min(end, to) - Math.max(start, from)) / 1000));
+}
+
+function round_(n, p) {
+  const pw = Math.pow(10, p);
+  return Math.round(n * pw) / pw;
+}
+
+function formatDuration_(s) {
+  s = Number(s) || 0;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function localDate(d = new Date()) {
+  const off = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - off).toISOString().slice(0, 10);
+}
+
+function formatDateTimeString(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+}
+
+function showToast(msg, isError = false) {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    t.style.position = 'fixed';
+    t.style.bottom = '80px';
+    t.style.left = '50%';
+    t.style.transform = 'translateX(-50%)';
+    t.style.padding = '10px 18px';
+    t.style.borderRadius = '20px';
+    t.style.color = '#fff';
+    t.style.fontSize = '0.9rem';
+    t.style.zIndex = '2000';
+    t.style.transition = 'opacity 0.3s ease';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.background = isError ? '#e53e3e' : '#2d3748';
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 3000);
+}
+
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function startSleepClock() {
+  const active = state.home?.activeSleep;
+  if (!active) return;
+  const tick = () => {
+    const el = document.getElementById('sleep-clock');
+    if (el) el.textContent = clock((Date.now() - Number(active['Start Date/time (Epoch)'])) / 1000);
+    const sheetEl = document.getElementById('sheet-sleep-clock');
+    if (sheetEl) sheetEl.textContent = clock((Date.now() - Number(active['Start Date/time (Epoch)'])) / 1000);
+  };
+  tick();
+  state.sleepTimer = setInterval(tick, 1000);
+}
+
+function clock(s) {
+  s = Math.max(0, Math.floor(s));
+  return [Math.floor(s/3600), Math.floor((s%3600)/60), s%60].map(v => String(v).padStart(2,'0')).join(':');
+}
+
+function duration(s) {
+  return formatDuration_(s);
+}
+
+function formatTimeEntry(e) {
+  const ep = Number(e['Start Date/time (Epoch)']);
+  if (ep) return new Date(ep).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const m = String(e['Start Date/time'] || '').match(/ (\d{1,2}:\d{2})/);
+  return m ? m[1] : '';
+}
+
+function relativeTime(e) {
+  const ep = Number(e['[Sleep] End Date/time (Epoch)'] || e['Start Date/time (Epoch)']);
+  if (!ep) return formatTimeEntry(e);
+  const mins = Math.max(0, Math.floor((Date.now() - ep) / 60000));
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  return hrs < 24 ? `${hrs}h ${mins % 60}m ago` : `${Math.floor(hrs / 24)}d ago`;
+}
+
+function latestLabel(t) {
+  return { 'Bottle Feed': 'Last feeding', 'Diaper': 'Last change', 'Sleep': 'Woke up', 'Solid Feed': 'Last meal' }[t] || 'Last entry';
+}
+
+function latestValue(e) {
+  if (e.Type === 'Bottle Feed') {
+    const v = e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || '';
+    const u = e['[Bottle Feed] Volume Unit'] || '';
+    return `${v}<small>${u}</small>`;
+  }
+  if (e.Type === 'Diaper') return escapeHtml((e['[Diaper] Type'] || 'Diaper').toLowerCase());
+  if (e.Type === 'Sleep') return duration(e['[Sleep] Duration (Seconds)']);
+  return escapeHtml(e['[Solid Feed] Meal'] || 'Meal');
+}
+
+==> ./Code.gs <==
+const SHEET_NAME = 'Core Data';
+const CAREGIVERS = ['Sharat', 'Marianne'];
+
+// Handle incoming requests from your hosted front-end
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+    
+    if (action === 'getBootstrap') {
+      return jsonResponse_(getBootstrapData_());
+    } else if (action === 'batchSync') {
+      const result = batchSyncData_(data.mutations);
+      return jsonResponse_(result);
+    }
+    
+    return jsonResponse_({ error: 'Invalid action' });
+  } catch (err) {
+    return jsonResponse_({ error: err.toString() });
+  }
+}
+
+function doGet(e) {
+  // Optional: Handle simple GET requests or health checks
+  return jsonResponse_({ status: 'LittleLog API is active' });
+}
+
+function getSheet_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet not found: ${SHEET_NAME}`);
+  return sheet;
+}
+
+function getBootstrapData_() {
+  const sheet = getSheet_();
+  const rows = sheet.getDataRange().getDisplayValues();
+  const headers = rows[0] || [];
+  const profileNameIndex = headers.indexOf('Profile Name');
+  
+  let profiles = ['Baby'];
+  if (profileNameIndex !== -1 && rows.length > 1) {
+    const names = rows.slice(1).map(r => r[profileNameIndex]).map(String).map(v => v.trim()).filter(Boolean);
+    profiles = [...new Set(names)].sort();
+  }
+
+  return {
+    profiles: profiles,
+    caregivers: CAREGIVERS,
+    allRows: rows
+  };
+}
+
+function batchSyncData_(mutations) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const sheet = getSheet_();
+    const rows = sheet.getDataRange().getValues();
+    const headers = rows[0] || [];
+    const keyIndex = headers.indexOf('_activityKey');
+
+    mutations.forEach(mutation => {
+      if (mutation.action === 'create') {
+        const newRow = headers.map(h => mutation.data[h] || '');
+        sheet.appendRow(newRow);
+      } else if (mutation.action === 'update') {
+        const rowIndex = rows.findIndex((r, idx) => idx > 0 && r[keyIndex] === mutation.key);
+        if (rowIndex !== -1) {
+          const updatedRow = rows[rowIndex].map((val, idx) => {
+            const field = headers[idx];
+            return mutation.data[field] !== undefined ? mutation.data[field] : val;
+          });
+          sheet.getRange(rowIndex + 1, 1, 1, updatedRow.length).setValues([updatedRow]);
+        }
+      } else if (mutation.action === 'delete') {
+        const rowIndex = rows.findIndex((r, idx) => idx > 0 && r[keyIndex] === mutation.key);
+        if (rowIndex !== -1) {
+          sheet.deleteRow(rowIndex + 1);
+        }
+      }
+    });
+
+    return { success: true, serverTimestamp: Date.now() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function jsonResponse_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}

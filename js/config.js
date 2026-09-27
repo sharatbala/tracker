@@ -15,12 +15,6 @@ const state = {
   profiles: [], 
   caregivers: ['Sharat', 'Marianne'], 
   home: null, 
-  detailType: 'Bottle Feed', 
-  detailTab: 'calendar', 
-  days: 7, 
-  endDate: new Date().toISOString().split('T')[0], 
-  selectedDate: new Date().toISOString().split('T')[0], 
-  detail: null, 
   sleepTimer: null, 
   loadingCount: 0 
 }; //[cite: 1]

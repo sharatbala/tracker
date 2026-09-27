@@ -4,9 +4,12 @@
 
 async function initialize() { 
   const saved = JSON.parse(localStorage.getItem('littlelog-settings') || '{}'); 
-  // Fallback to 'Baby' if no profile is saved locally yet
-  state.profile = saved.profile || 'Baby'; 
-  state.caregiver = saved.caregiver || 'Sharat';
+  
+  // Fully data-driven: no hardcoded personal or family name defaults
+  state.profile = saved.profile || ''; 
+  state.caregiver = saved.caregiver || '';
+  state.caregivers = saved.caregivers || [];
+  state.profiles = saved.profiles || [];
 
   let apiUrl = localStorage.getItem('littlelog-api-url'); 
   if (!apiUrl) { 
@@ -47,14 +50,14 @@ async function syncInBackground() {
     const bootstrap = await callApi('getBootstrap');
 
     if (bootstrap) {
-      state.profiles = bootstrap.profiles?.length ? bootstrap.profiles : ['Baby'];
-      state.caregivers = bootstrap.caregivers || ['Sharat', 'Marianne'];
+      state.profiles = bootstrap.profiles?.length ? bootstrap.profiles : (state.profile ? [state.profile] : []);
+      state.caregivers = bootstrap.caregivers?.length ? bootstrap.caregivers : (state.caregiver ? [state.caregiver] : []);
 
-      // Set valid profile
-      if (!state.profile || !state.profiles.includes(state.profile)) {
+      // Set valid profile/caregiver dynamically from data if not already set
+      if (!state.profile && state.profiles.length > 0) {
         state.profile = state.profiles[0];
       }
-      if (!state.caregivers.includes(state.caregiver)) {
+      if (!state.caregiver && state.caregivers.length > 0) {
         state.caregiver = state.caregivers[0];
       }
 
@@ -95,6 +98,7 @@ function openDetail(type, navButton) {
   document.getElementById('history-page')?.classList.add('hidden'); 
   document.getElementById('settings-page')?.classList.add('hidden'); 
   document.getElementById('detail-page')?.classList.remove('hidden'); 
+  document.getElementById('trends-page')?.classList.add('hidden');
   loadDetail(); 
 } 
 
@@ -105,31 +109,24 @@ function showHistoryPage(navButton) {
   document.getElementById('home-page')?.classList.add('hidden');
   document.getElementById('detail-page')?.classList.add('hidden');
   document.getElementById('settings-page')?.classList.add('hidden');
+  document.getElementById('trends-page')?.classList.add('hidden');
   document.getElementById('history-page')?.classList.remove('hidden');
 
-  // Trigger history view initialization
   if (typeof initHistoryView === 'function') {
     initHistoryView();
   }
 }
 
-// Switch to Settings Page View
+// Switch to Settings Page View (Single streamlined handler)
 function showSettingsPage(navButton) {
   if (navButton) activateNav(navButton);
 
-  // Hide all other main pages
   document.getElementById('home-page')?.classList.add('hidden');
   document.getElementById('detail-page')?.classList.add('hidden');
   document.getElementById('history-page')?.classList.add('hidden');
+  document.getElementById('trends-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.remove('hidden');
 
-  // Show settings page
-  const settingsEl = document.getElementById('settings-page');
-  if (settingsEl) {
-    settingsEl.classList.remove('hidden');
-    settingsEl.style.display = 'block';
-  }
-
-  // Trigger settings view initialization
   if (typeof initSettingsView === 'function') {
     initSettingsView();
   }
@@ -141,10 +138,29 @@ function showHome(navButton) {
   document.getElementById('detail-page')?.classList.add('hidden'); 
   document.getElementById('settings-page')?.classList.add('hidden'); 
   document.getElementById('home-page')?.classList.remove('hidden'); 
+  document.getElementById('trends-page')?.classList.add('hidden');
   
   if (navButton) activateNav(navButton); 
   state.detail = null; 
   loadHome(); 
+}
+
+function showTrendsPage(navButton) {
+  if (navButton) activateNav(navButton);
+  
+  document.getElementById('home-page')?.classList.add('hidden');
+  document.getElementById('detail-page')?.classList.add('hidden');
+  document.getElementById('history-page')?.classList.add('hidden');
+  document.getElementById('settings-page')?.classList.add('hidden');
+  
+  let trendsPage = document.getElementById('trends-page');
+  if (!trendsPage) {
+    trendsPage = document.createElement('div');
+    trendsPage.id = 'trends-page';
+    document.body.appendChild(trendsPage); // or append inside your main app container container element
+  }
+  trendsPage.classList.remove('hidden');
+  initTrendsView();
 }
 
 // Navigation button active status helper
