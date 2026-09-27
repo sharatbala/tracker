@@ -12,13 +12,27 @@
   <title>LittleLog</title>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Serif+Display&display=swap" rel="stylesheet">
   <link href="style.css" rel="stylesheet">
-  <script src="script.js" defer></script>
+
+  <!-- Added defer to ensure DOM elements exist before scripts run -->
+  <script src="js/config.js" defer></script>
+  <script src="js/utils.js" defer></script>
+  <script src="js/db-sync.js" defer></script>
+  <script src="js/editor.js" defer></script>
+  <script src="js/views.js" defer></script>
+  <script src="js/history.js" defer></script>
+  <script src="js/settings.js" defer></script>
+  <script src="js/app.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
     <header class="app-header">
       <div class="eyebrow">LITTLELOG</div>
       <h1 id="profile-title">Loading…</h1>
+      <!-- Example Header Indicator -->
+      <div id="sync-status" class="sync-badge synced">
+        <span class="sync-dot"></span>
+        <span id="sync-text">Synced</span>
+      </div>
     </header>
 
     <main id="home-page" class="page">
@@ -28,14 +42,19 @@
 
     <main id="detail-page" class="page hidden"></main>
 
+    
+    <main id="history-page" class="page hidden"></main>
+    
+    <main id="settings-page" class="page hidden"></main>
+
     <nav class="bottom-nav">
       <button class="active" onclick="showHome(this)">
         <span>✦</span><small>Activity</small>
       </button>
-      <button onclick="openDetail('Bottle Feed', this)">
+      <button onclick="showHistoryPage(this)">
         <span>▣</span><small>History</small>
       </button>
-      <button onclick="openSettings(this)">
+      <button onclick="showSettingsPage(this)">
         <span>♡</span><small>Settings</small>
       </button>
     </nav>
@@ -47,14 +66,33 @@
     <span>Loading…</span>
   </div>
   <div id="toast" class="toast hidden"></div>
+  
+  <div id="editor-overlay" class="editor-overlay hidden">
+    <div class="editor">
+      <div class="sheet-handle"></div>
+      
+      <!-- Dynamic Color Header -->
+      <div id="editor-header" class="editor-header feed">
+        <button type="button" class="close-btn" onclick="closeEditor()">✕</button>
+        <h2 id="editor-title">New Feed</h2>
+        <button type="button" class="save-btn" onclick="saveEntry()">Save</button>
+      </div>
+
+      <!-- Dynamic Form Body -->
+      <div id="editor-body" class="editor-body">
+        <!-- Injected dynamically via JS based on type -->
+      </div>
+    </div>
+  </div>
+
   <script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js')
-        .then((reg) => console.log('Service Worker registered successfully!', reg.scope))
-        .catch((err) => console.error('Service Worker registration failed:', err));
-    });
-  }
-</script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then((reg) => console.log('Service Worker registered successfully!', reg.scope))
+          .catch((err) => console.error('Service Worker registration failed:', err));
+      });
+    }
+  </script>
 </body>
 </html>

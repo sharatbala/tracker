@@ -1,3 +1,4 @@
+// --- Constants & Global State ---
 const TYPES = {
   'Bottle Feed': { key: 'feed', title: 'Feed', icon: '🍼', color: '#ffd052' },
   'Diaper': { key: 'diaper', title: 'Diaper', icon: '◒', color: '#f2ecdc' },
@@ -8,6 +9,7 @@ const TYPES = {
 const DB_NAME = 'LittleLogLocalDB';
 const DB_VERSION = 1;
 let dbInstance = null;
+let closeOverlayTimer = null;
 
 const state = {
   profile: '',
@@ -25,6 +27,7 @@ const state = {
   loadingCount: 0
 };
 
+// --- App Lifecycle ---
 window.addEventListener('DOMContentLoaded', initialize);
 
 function getApiUrl() {
@@ -39,7 +42,7 @@ async function callApi(action, payload = {}) {
     method: 'POST',
     body: JSON.stringify({ action, ...payload })
   });
-  
+
   const text = await response.text();
   try {
     return JSON.parse(text);
@@ -49,14 +52,11 @@ async function callApi(action, payload = {}) {
   }
 }
 
-
-
 async function initialize() {
   const saved = JSON.parse(localStorage.getItem('littlelog-settings') || '{}');
   state.profile = saved.profile || '';
   state.caregiver = saved.caregiver || 'Sharat';
 
-  // Check for stored API URL, prompt if missing
   let apiUrl = localStorage.getItem('littlelog-api-url');
   if (!apiUrl) {
     apiUrl = prompt('Please enter your Google Apps Script Web App URL:');
@@ -72,7 +72,7 @@ async function initialize() {
   try {
     dbInstance = await openDatabase();
     const bootstrap = await callApi('getBootstrap');
-    
+
     state.profiles = bootstrap?.profiles?.length ? bootstrap.profiles : ['Baby'];
     state.caregivers = bootstrap?.caregivers || ['Sharat', 'Marianne'];
 
@@ -112,7 +112,7 @@ async function syncBootstrapToIDB(rows) {
   const headers = rows[0];
   const tx = dbInstance.transaction('entries', 'readwrite');
   const store = tx.objectStore('entries');
-  
+
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const obj = {};
@@ -124,35 +124,37 @@ async function syncBootstrapToIDB(rows) {
 }
 
 async function getAllLocalEntries() {
+  if (!dbInstance) return [];
   return new Promise((resolve) => {
     const tx = dbInstance.transaction('entries', 'readonly');
     const store = tx.objectStore('entries');
     const req = store.getAll();
     req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => resolve([]);
   });
 }
 
 async function upsertLocalEntry(entry, action = 'create') {
+  if (!dbInstance) return;
   const tx = dbInstance.transaction(['entries', 'sync_queue'], 'readwrite');
   entry._synced = false;
   tx.objectStore('entries').put(entry);
   tx.objectStore('sync_queue').add({ action, key: entry._activityKey, data: entry, timestamp: Date.now() });
-  
   tx.oncomplete = () => triggerBackgroundSync();
 }
 
 async function deleteLocalEntry(key) {
+  if (!dbInstance) return;
   const tx = dbInstance.transaction(['entries', 'sync_queue'], 'readwrite');
   tx.objectStore('entries').delete(key);
   tx.objectStore('sync_queue').add({ action: 'delete', key, timestamp: Date.now() });
-  
   tx.oncomplete = () => triggerBackgroundSync();
 }
 
 // --- Background Sync Engine ---
 function setupBackgroundSync() {
   window.addEventListener('online', triggerBackgroundSync);
-  setInterval(triggerBackgroundSync, 45000); // Try syncing every 45s
+  setInterval(triggerBackgroundSync, 45000);
 }
 
 async function triggerBackgroundSync() {
@@ -168,8 +170,6 @@ async function triggerBackgroundSync() {
 
     try {
       await callApi('batchSync', { mutations: queue });
-      
-      // Clear sync queue items on success
       const clearTx = dbInstance.transaction('sync_queue', 'readwrite');
       const clearStore = clearTx.objectStore('sync_queue');
       queue.forEach(item => clearStore.delete(item.id));
@@ -179,10 +179,11 @@ async function triggerBackgroundSync() {
   };
 }
 
-// --- Client-Side Local Aggregations (Replaces Server Compute) ---
+// --- Aggregation & Data Loading ---
 async function loadHome() {
   clearInterval(state.sleepTimer);
-  document.getElementById('profile-title').textContent = state.profile;
+  const profileTitleEl = document.getElementById('profile-title');
+  if (profileTitleEl) profileTitleEl.textContent = state.profile;
 
   const entries = await getAllLocalEntries();
   const profileEntries = entries
@@ -247,61 +248,26 @@ async function loadDetail() {
   renderDetail();
 }
 
-// --- Helper Utilities & Calculations ---
-function summarizeDay_(date, type, entries, allSleep) {
-  if (type === 'Bottle Feed') {
-    let formula = 0, breastMilk = 0;
-    entries.forEach(entry => {
-      const fVal = volumeMl_(entry['[Bottle Feed] Formula Volume'], entry['[Bottle Feed] Formula Volume Unit']);
-      const bVal = volumeMl_(entry['[Bottle Feed] Breast Milk Volume'], entry['[Bottle Feed] Breast Milk Volume Unit']);
-      if (fVal || bVal) { formula += fVal; breastMilk += bVal; } 
-      else { formula += bottleMl_(entry); }
-    });
-    return { date, total: formula + breastMilk, formula, breastMilk, instances: entries.map(instance_) };
-  }
-  if (type === 'Diaper') {
-    const wet = entries.filter(e => ['Wet', 'Both'].includes(e['[Diaper] Type'])).length;
-    const dirty = entries.filter(e => ['Dirty', 'Both'].includes(e['[Diaper] Type'])).length;
-    return { date, total: entries.length, wet, dirty, instances: entries.map(instance_) };
-  }
-  if (type === 'Sleep') {
-    const matching = allSleep.filter(e => sleepOverlap_(e, date) > 0);
-    return { date, total: matching.reduce((sum, e) => sum + sleepOverlap_(e, date), 0), instances: matching.map(instance_) };
-  }
-  return { date, total: entries.length, instances: entries.map(instance_) };
-}
-
-function formatDate(dateStr) {
-  if (!dateStr) return '';
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function instance_(entry) {
-  return {
-    key: entry._activityKey,
-    start: entry['Start Date/time'],
-    startEpoch: Number(entry['Start Date/time (Epoch)']) || 0,
-    end: entry['[Sleep] End Date/time'] || '',
-    endEpoch: Number(entry['[Sleep] End Date/time (Epoch)']) || 0,
-    detail: entryDetail_(entry)
-  };
-}
-
-// Standard UI Rendering Helpers matching original layout
+// --- Home UI Rendering ---
 function renderHome() {
   const types = ['Bottle Feed', 'Diaper', 'Sleep', 'Solid Feed'];
-  document.getElementById('activity-cards').innerHTML = types.map(renderCard).join('');
+  const cardsContainer = document.getElementById('activity-cards');
+  if (cardsContainer) {
+    cardsContainer.innerHTML = types.map(renderCard).join('');
+  }
+
   const today = state.home.today;
-  document.getElementById('today-summary').innerHTML = `
-    <div class="section-heading"><h2>Today</h2><span>${formatDate(localDate())}</span></div>
-    <div class="summary-grid">
-      <div><strong>${duration(today.sleepSeconds)}</strong><span>Sleep</span></div>
-      <div><strong>${today.feedCount}</strong><span>Feeds · ${today.feedMl} mL</span></div>
-      <div><strong>${today.diaperCount}</strong><span>Diapers</span></div>
-      <div><strong>${today.solidsCount}</strong><span>Meals</span></div>
-    </div>`;
+  const todaySummaryEl = document.getElementById('today-summary');
+  if (todaySummaryEl) {
+    todaySummaryEl.innerHTML = `
+      <div class="section-heading"><h2>Today</h2><span>${formatDate(localDate())}</span></div>
+      <div class="summary-grid">
+        <div><strong>${duration(today.sleepSeconds)}</strong><span>Sleep</span></div>
+        <div><strong>${today.feedCount}</strong><span>Feeds · ${today.feedMl} mL</span></div>
+        <div><strong>${today.diaperCount}</strong><span>Diapers</span></div>
+        <div><strong>${today.solidsCount}</strong><span>Meals</span></div>
+      </div>`;
+  }
 }
 
 function renderCard(type) {
@@ -310,12 +276,14 @@ function renderCard(type) {
   if (type === 'Sleep' && state.home.activeSleep) return renderActiveSleep(config, recent);
 
   const latest = recent[0];
-  const highlightAction = latest ? `openEditorByKey('${latest._activityKey}')` : `openEditor('${type}')`;
+  const highlightAction = latest ? `openEditorByKey('${latest._activityKey}')` : (type === 'Bottle Feed' ? "openFeedActionSheet()" : `openEditor('${type}')`);
+  const addAction = type === 'Bottle Feed' ? "openFeedActionSheet()" : `openEditor('${type}')`;
 
   return `
     <article class="activity-card">
       <div class="card-header" style="background:${config.color}">
-        <h2>${config.title}</h2><button class="add-button" onclick="openEditor('${type}')">+</button>
+        <h2>${config.title}</h2>
+        <button class="add-button" onclick="${addAction}">+</button>
       </div>
       <button class="card-highlight" onclick="${highlightAction}">
         <span class="activity-icon">${config.icon}</span>
@@ -354,19 +322,21 @@ function renderActiveSleep(config, recent) {
     </article>`;
 }
 
+// --- Detail Screen UI Rendering ---
 function renderDetail() {
   const detail = state.detail;
   if (!detail) return;
 
   const typeConfig = TYPES[detail.type] || { title: detail.type, icon: '📋', color: '#f2ecdc' };
+  const pageEl = document.getElementById('detail-page');
+  if (!pageEl) return;
 
-  document.getElementById('detail-page').innerHTML = `
+  pageEl.innerHTML = `
     <div class="detail-header" style="background:${typeConfig.color}">
       <button onclick="showHome()">← Back</button>
       <h2>${typeConfig.icon} ${typeConfig.title}</h2>
       <button onclick="openEditor('${detail.type}')">+</button>
     </div>
-    
     <div class="detail-sub-banner">
       <div class="detail-headline"><strong>${escapeHtml(detail.headline)}</strong></div>
       <div class="detail-tabs">
@@ -374,7 +344,6 @@ function renderDetail() {
         <button class="${state.detailTab === 'list' ? 'active' : ''}" onclick="switchDetailTab('list')">List</button>
       </div>
     </div>
-
     <div class="detail-content">
       ${state.detailTab === 'calendar' ? renderDetailCalendar(detail) : renderDetailList(detail)}
     </div>`;
@@ -424,103 +393,118 @@ function renderDetailList(detail) {
     </div>`;
 }
 
-function entryDetail(entry) {
-  return entryDetail_(entry);
+// --- Bottom Sheet & Action Menu Engine ---
+function openFeedActionSheet() {
+  const content = `
+    <div class="sheet-options">
+      <button class="sheet-option-btn" onclick="openEditor('Bottle Feed')">
+        <span style="font-size: 1.4rem;">🍼</span>
+        <div>
+          <strong>Bottle Feed</strong>
+          <div style="font-size:0.8rem; color:#8e8e93;">Log formula or breast milk volume</div>
+        </div>
+      </button>
+      <button class="sheet-option-btn" onclick="openEditor('Solid Feed')">
+        <span style="font-size: 1.4rem;">🥣</span>
+        <div>
+          <strong>Solids</strong>
+          <div style="font-size:0.8rem; color:#8e8e93;">Log breakfast, lunch, or meal items</div>
+        </div>
+      </button>
+    </div>
+  `;
+  showBottomSheet('Choose Feed Type', content, false);
 }
 
-async function openEditorByKey(key) {
-  const entries = await getAllLocalEntries();
-  const entry = entries.find(e => e._activityKey === key);
-  if (entry) openEditor(entry.Type, entry);
-}
-
-async function saveEditorEntry(type, key, payload) {
-  if (!payload._activityKey) {
-    payload._activityKey = 't-' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-  }
-  await upsertLocalEntry(payload, key ? 'update' : 'create');
-  closeOverlay();
-  showToast(key ? 'Updated' : 'Saved');
-  if (state.detail) loadDetail();
-  await loadHome();
-}
-
-async function startSleep() {
-  const now = new Date();
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const entry = {
-    Type: 'Sleep',
-    'Profile Name': state.profile,
-    'Start Date/time': formatDateTimeString(now),
-    'Start Date/time (Epoch)': now.getTime(),
-    'Created By Caregiver': state.caregiver,
-    'Last Updated By Caregiver': state.caregiver,
-    'Time Zone': zone,
-    _activityKey: 't-' + Math.random().toString(36).substring(2, 15)
-  };
-  await upsertLocalEntry(entry, 'create');
-  showToast('Sleep started');
-  await loadHome();
-}
-
-async function endActiveSleep() {
-  const active = state.home.activeSleep;
-  if (!active) return;
-  const now = new Date();
-  const startEpoch = Number(active['Start Date/time (Epoch)']);
-  
-  active['[Sleep] End Date/time'] = formatDateTimeString(now);
-  active['[Sleep] End Date/time (Epoch)'] = now.getTime();
-  active['[Sleep] Duration (Seconds)'] = Math.max(0, Math.floor((now.getTime() - startEpoch) / 1000));
-  active['Last Updated By Caregiver'] = state.caregiver;
-
-  await upsertLocalEntry(active, 'update');
-  showToast('Sleep saved');
-  await loadHome();
-}
-
-// --- Standard UI Navigation & Utilities ---
-function openDetail(type, navButton) {
-  state.detailType = type;
-  state.selectedDate = state.endDate;
-  activateNav(navButton || document.querySelectorAll('.bottom-nav button')[1]);
-  document.getElementById('home-page').classList.add('hidden');
-  document.getElementById('detail-page').classList.remove('hidden');
-  loadDetail();
-}
-
-function showHome(navButton) {
-  document.getElementById('detail-page').classList.add('hidden');
-  document.getElementById('home-page').classList.remove('hidden');
-  activateNav(navButton || document.querySelector('.bottom-nav button'));
-  state.detail = null;
-  loadHome();
-}
-
-// --- Editor Overlay System ---
 function openEditor(type, existingEntry = null) {
   const isEdit = !!existingEntry;
   const config = TYPES[type] || { title: type, color: '#f2ecdc' };
   const now = new Date();
   
-  const startVal = existingEntry ? existingEntry['Start Date/time'].slice(0, 16) : formatDateTimeLocal_(now);
+  const startVal = existingEntry && existingEntry['Start Date/time'] 
+    ? existingEntry['Start Date/time'].slice(0, 16).replace(' ', 'T') 
+    : formatDateTimeLocal_(now);
+    
   const key = existingEntry ? existingEntry._activityKey : '';
 
-  document.getElementById('overlay-root').innerHTML = `
-    <div class="editor-overlay">
-      <div class="editor">
-        <div class="editor-header" style="background:${config.color}">
-          <button onclick="closeOverlay()">×</button>
-          <h2>${isEdit ? 'Edit' : 'New'} ${config.title}</h2>
-          <button onclick="saveEditor('${type}', '${key}')">Save</button>
+  const content = `
+    <div id="editor-fields">
+      ${type === 'Sleep' ? renderSleepTimerHero(existingEntry) : ''}
+      
+      ${editorRow('Start Time', `<input id="edit-start" type="datetime-local" value="${startVal}">`)}
+      
+      ${editorSpecificFields(type, existingEntry)}
+      
+      ${isEdit ? `<button class="delete-button" onclick="deleteCurrent('${key}')">Delete Entry</button>` : ''}
+    </div>
+  `;
+
+  showBottomSheet(
+    `${isEdit ? 'Edit' : 'New'} ${config.title}`, 
+    content, 
+    true, 
+    () => saveEditor(type, key)
+  );
+}
+
+function showBottomSheet(title, bodyHtml, showSaveBtn = true, onSave = null) {
+  if (closeOverlayTimer) {
+    clearTimeout(closeOverlayTimer);
+    closeOverlayTimer = null;
+  }
+
+  let root = document.getElementById('overlay-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'overlay-root';
+    document.body.appendChild(root);
+  }
+
+  root.innerHTML = `
+    <div class="sheet-overlay" id="sheet-overlay" onclick="handleBackdropClick(event)">
+      <div class="bottom-sheet" onclick="event.stopPropagation()">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <button class="btn-cancel" onclick="closeOverlay()">Cancel</button>
+          <h2>${title}</h2>
+          ${showSaveBtn ? `<button class="btn-save" id="sheet-save-btn">Save</button>` : '<div style="width:40px;"></div>'}
         </div>
-        <div class="editor-body">
-          ${editorRow('Start Time', `<input id="edit-start" type="datetime-local" value="${startVal}">`)}
-          ${editorSpecificFields(type, existingEntry)}
-          ${isEdit ? `<button class="delete-button" onclick="deleteCurrent('${key}')">Delete Entry</button>` : ''}
+        <div class="sheet-body">
+          ${bodyHtml}
         </div>
       </div>
-    </div>`;
+    </div>
+  `;
+
+  if (showSaveBtn && onSave) {
+    document.getElementById('sheet-save-btn').onclick = onSave;
+  }
+
+  requestAnimationFrame(() => {
+    document.getElementById('sheet-overlay')?.classList.add('active');
+  });
+}
+
+function closeOverlay() {
+  const overlay = document.getElementById('sheet-overlay');
+  if (overlay) {
+    overlay.classList.remove('active');
+    if (closeOverlayTimer) clearTimeout(closeOverlayTimer);
+    closeOverlayTimer = setTimeout(() => {
+      const root = document.getElementById('overlay-root');
+      if (root) root.innerHTML = '';
+      closeOverlayTimer = null;
+    }, 250);
+  }
+}
+
+function handleBackdropClick(e) {
+  if (e.target.id === 'sheet-overlay') closeOverlay();
+}
+
+// --- Specific Field Renderers ---
+function editorRow(label, content) {
+  return `<div class="editor-row"><label>${label}</label><div>${content}</div></div>`;
 }
 
 function editorSpecificFields(type, e) {
@@ -529,7 +513,7 @@ function editorSpecificFields(type, e) {
     const unit = e ? (e['[Bottle Feed] Volume Unit'] || 'mL') : 'mL';
     const feedType = e ? (e['[Bottle Feed] Type'] || 'Formula') : 'Formula';
     return `
-      ${editorRow('Volume', `<input id="edit-volume" type="number" value="${vol}" placeholder="0">`)}
+      ${editorRow('Volume', `<input id="edit-volume" type="number" value="${vol}" placeholder="0" step="5">`)}
       ${editorRow('Unit', segmentedChoices('feed-unit', ['mL', 'oz'], unit, 'chooseFeedUnit'))}
       ${editorRow('Type', segmentedChoices('feed-type', ['Formula', 'Breast Milk', 'Mixed'], feedType, 'chooseFeedType'))}
     `;
@@ -543,7 +527,7 @@ function editorSpecificFields(type, e) {
     `;
   }
   if (type === 'Sleep') {
-    const endVal = e && e['[Sleep] End Date/time'] ? e['[Sleep] End Date/time'].slice(0, 16) : '';
+    const endVal = e && e['[Sleep] End Date/time'] ? e['[Sleep] End Date/time'].slice(0, 16).replace(' ', 'T') : '';
     return `
       ${editorRow('End Time', `<input id="edit-sleep-end" type="datetime-local" value="${endVal}">`)}
     `;
@@ -559,21 +543,45 @@ function editorSpecificFields(type, e) {
   return '';
 }
 
-function editorRow(label, content) {
-  return `<div class="editor-row"><label>${label}</label><div>${content}</div></div>`;
+function renderSleepTimerHero(e) {
+  const active = state.home?.activeSleep;
+  if (!e && active) {
+    return `
+      <div class="timer-hero">
+        <div class="timer-display" id="sheet-sleep-clock">00:00:00</div>
+        <button type="button" class="timer-btn" style="background:#ff453a; color:#fff;" onclick="endActiveSleep()">Stop & Save Sleep</button>
+      </div>
+    `;
+  }
+  return `
+    <div class="timer-hero">
+      <div class="timer-display">0H 0M</div>
+      <button type="button" class="timer-btn" onclick="startSleepNow()">Start Sleep Timer</button>
+    </div>
+  `;
 }
 
+// --- Segmented Control Component Helpers ---
 function segmentedChoices(name, options, selected, callbackName) {
-  return `<div class="segmented" data-group="${name}">
-    ${options.map(opt => `<button type="button" class="${opt === selected ? 'active' : ''}" onclick="${callbackName}('${opt}', this)">${opt}</button>`).join('')}
-  </div>`;
+  return `
+    <div class="segmented" data-group="${name}">
+      ${options.map(opt => `
+        <button type="button" class="${opt === selected ? 'active' : ''}" onclick="${callbackName}('${opt}', this)">${opt}</button>
+      `).join('')}
+    </div>
+  `;
 }
 
-// Segmented choice selection helpers
 function chooseFeedUnit(val, btn) { selectSegment(btn); }
 function chooseFeedType(val, btn) { selectSegment(btn); }
 function chooseDiaperType(val, btn) { selectSegment(btn); }
 function chooseSolidMeal(val, btn) { selectSegment(btn); }
+function chooseCaregiver(val, btn) { 
+  selectSegment(btn); 
+  const input = document.getElementById('setting-caregiver');
+  if (input) input.value = val;
+}
+
 function selectSegment(btn) {
   const group = btn.parentElement;
   group.querySelectorAll('button').forEach(b => b.classList.remove('active'));
@@ -586,19 +594,20 @@ function getSelectedSegment(groupName) {
   return active ? active.textContent.trim() : '';
 }
 
+// --- Field Saver Processors ---
 function saveFeedFields(payload) {
-  payload['[Bottle Feed] Volume'] = document.getElementById('edit-volume').value || '';
+  payload['[Bottle Feed] Volume'] = document.getElementById('edit-volume')?.value || '';
   payload['[Bottle Feed] Volume Unit'] = getSelectedSegment('feed-unit');
   payload['[Bottle Feed] Type'] = getSelectedSegment('feed-type');
 }
 
 function saveDiaperFields(payload) {
   payload['[Diaper] Type'] = getSelectedSegment('diaper-type');
-  payload['[Diaper] Detail'] = document.getElementById('edit-diaper-detail').value || '';
+  payload['[Diaper] Detail'] = document.getElementById('edit-diaper-detail')?.value || '';
 }
 
 function saveSleepFields(payload, startStr) {
-  const endStr = document.getElementById('edit-sleep-end').value;
+  const endStr = document.getElementById('edit-sleep-end')?.value;
   if (endStr) {
     const startEpoch = new Date(startStr).getTime();
     const endEpoch = new Date(endStr).getTime();
@@ -610,7 +619,7 @@ function saveSleepFields(payload, startStr) {
 
 function saveSolidFields(payload) {
   payload['[Solid Feed] Meal'] = getSelectedSegment('solid-meal');
-  payload['[Solid Feed] Food'] = document.getElementById('edit-solid-food').value || '';
+  payload['[Solid Feed] Food'] = document.getElementById('edit-solid-food')?.value || '';
 }
 
 function commonPayload(type, startStr) {
@@ -628,41 +637,48 @@ function commonPayload(type, startStr) {
 }
 
 function formatDateTimeLocal_(d) {
-  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function openSettings(navButton) {
-  activateNav(navButton || document.querySelectorAll('.bottom-nav button')[2]);
-  document.getElementById('overlay-root').innerHTML = `
-    <div class="editor-overlay">
-      <div class="editor settings-editor">
-        <div class="editor-header settings">
-          <button onclick="closeOverlay()">×</button>
-          <h2>Settings</h2>
-          <button onclick="saveSettings()">Save</button>
-        </div>
-        <div class="editor-body">
-          <input id="setting-original-name" type="hidden" value="${escapeHtml(state.profile)}">
-          ${editorRow('Name', `<input id="setting-name" value="${escapeHtml(state.profile)}">`)}
-          <input id="setting-caregiver" type="hidden" value="${escapeHtml(state.caregiver)}">
-          <div class="settings-section-label">Caregiver</div>
-          ${segmentedChoices('caregiver', state.caregivers, state.caregiver, 'chooseCaregiver')}
-        </div>
-      </div>
-    </div>`;
-}
-
-function saveSettings() {
-  state.profile = document.getElementById('setting-name').value.trim() || state.profile;
-  state.caregiver = document.getElementById('setting-caregiver').value;
-  localStorage.setItem('littlelog-settings', JSON.stringify({ profile: state.profile, caregiver: state.caregiver }));
+// --- Form Actions & Timers ---
+async function startSleepNow() {
+  const now = new Date();
+  const payload = commonPayload('Sleep', now.toISOString());
+  payload._activityKey = 'act_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+  
+  await upsertLocalEntry(payload, 'create');
   closeOverlay();
-  showHome();
+  showToast('Sleep timer started');
+  await loadHome();
 }
 
-// Form Submission Hook override
+async function endActiveSleep() {
+  const active = state.home?.activeSleep;
+  if (!active) return;
+  const now = new Date();
+  const startEpoch = Number(active['Start Date/time (Epoch)']);
+
+  active['[Sleep] End Date/time'] = formatDateTimeString(now);
+  active['[Sleep] End Date/time (Epoch)'] = now.getTime();
+  active['[Sleep] Duration (Seconds)'] = Math.max(0, Math.floor((now.getTime() - startEpoch) / 1000));
+  active['Last Updated By Caregiver'] = state.caregiver;
+
+  await upsertLocalEntry(active, 'update');
+  closeOverlay();
+  showToast('Sleep saved');
+  await loadHome();
+}
+
+async function openEditorByKey(key) {
+  const entries = await getAllLocalEntries();
+  const entry = entries.find(e => e._activityKey === key);
+  if (entry) openEditor(entry.Type, entry);
+}
+
 async function saveEditor(type, key) {
-  const startStr = document.getElementById('edit-start').value;
+  const startInput = document.getElementById('edit-start');
+  const startStr = startInput ? startInput.value : '';
   if (!startStr) {
     showToast('Start time is required', true);
     return;
@@ -680,57 +696,149 @@ async function saveEditor(type, key) {
   payload._activityKey = activityKey;
 
   try {
-    await queueMutation(action, activityKey, payload);
+    await upsertLocalEntry(payload, action);
     closeOverlay();
+    showToast(key ? 'Updated' : 'Saved');
+    if (state.detail) loadDetail();
     await loadHome();
-    showToast('Saved successfully');
-    triggerBackgroundSync();
   } catch (err) {
     console.error('Save failed:', err);
     showToast('Failed to save entry', true);
   }
 }
+
 async function deleteCurrent(key) {
   if (!confirm('Are you sure you want to delete this entry?')) return;
   try {
-    await queueMutation('delete', key, {});
+    await deleteLocalEntry(key);
     closeOverlay();
+    if (state.detail) loadDetail();
     await loadHome();
     showToast('Deleted entry');
-    triggerBackgroundSync();
   } catch (err) {
     console.error('Delete failed:', err);
     showToast('Failed to delete entry', true);
   }
 }
 
-function openEditorByKey(key) {
-  // Find entry in local IDB cache or state and open editor
-  dbInstance.transaction('entries', 'readonly').objectStore('entries').get(key).onsuccess = (e) => {
-    const entry = e.target.result;
-    if (entry) {
-      openEditor(entry.Type || entry['Type'], entry);
-    } else {
-      showToast('Entry not found locally', true);
-    }
+// --- Navigation & Settings ---
+function openDetail(type, navButton) {
+  state.detailType = type;
+  state.selectedDate = state.endDate;
+  activateNav(navButton || document.querySelectorAll('.bottom-nav button')[1]);
+  document.getElementById('home-page').classList.add('hidden');
+  document.getElementById('detail-page').classList.remove('hidden');
+  loadDetail();
+}
+
+function showHome(navButton) {
+  document.getElementById('detail-page').classList.add('hidden');
+  document.getElementById('home-page').classList.remove('hidden');
+  activateNav(navButton || document.querySelector('.bottom-nav button'));
+  state.detail = null;
+  loadHome();
+}
+
+function openSettings(navButton) {
+  activateNav(navButton || document.querySelectorAll('.bottom-nav button')[2]);
+  
+  const content = `
+    <div style="padding-bottom: 10px;">
+      <input id="setting-original-name" type="hidden" value="${escapeHtml(state.profile)}">
+      ${editorRow('Name', `<input id="setting-name" type="text" value="${escapeHtml(state.profile)}">`)}
+      <input id="setting-caregiver" type="hidden" value="${escapeHtml(state.caregiver)}">
+      <div style="margin: 16px 0 8px; font-size: 0.825rem; color: #a1a1a6; text-transform: uppercase;">Caregiver</div>
+      ${segmentedChoices('caregiver', state.caregivers, state.caregiver, 'chooseCaregiver')}
+    </div>
+  `;
+
+  showBottomSheet('Settings', content, true, saveSettings);
+}
+
+function saveSettings() {
+  const nameInput = document.getElementById('setting-name');
+  if (nameInput) state.profile = nameInput.value.trim() || state.profile;
+  localStorage.setItem('littlelog-settings', JSON.stringify({ profile: state.profile, caregiver: state.caregiver }));
+  closeOverlay();
+  showHome();
+}
+
+function activateNav(b) {
+  document.querySelectorAll('.bottom-nav button').forEach(i => i.classList.remove('active'));
+  if (b) b.classList.add('active');
+}
+
+// --- Data & Formatting Utilities ---
+function summarizeDay_(date, type, entries, allSleep) {
+  if (type === 'Bottle Feed') {
+    let formula = 0, breastMilk = 0;
+    entries.forEach(entry => {
+      const fVal = volumeMl_(entry['[Bottle Feed] Formula Volume'], entry['[Bottle Feed] Formula Volume Unit']);
+      const bVal = volumeMl_(entry['[Bottle Feed] Breast Milk Volume'], entry['[Bottle Feed] Breast Milk Volume Unit']);
+      if (fVal || bVal) { formula += fVal; breastMilk += bVal; } 
+      else { formula += bottleMl_(entry); }
+    });
+    return { date, total: formula + breastMilk, formula, breastMilk, instances: entries.map(instance_) };
+  }
+  if (type === 'Diaper') {
+    const wet = entries.filter(e => ['Wet', 'Both'].includes(e['[Diaper] Type'])).length;
+    const dirty = entries.filter(e => ['Dirty', 'Both'].includes(e['[Diaper] Type'])).length;
+    return { date, total: entries.length, wet, dirty, instances: entries.map(instance_) };
+  }
+  if (type === 'Sleep') {
+    const matching = allSleep.filter(e => sleepOverlap_(e, date) > 0);
+    return { date, total: matching.reduce((sum, e) => sum + sleepOverlap_(e, date), 0), instances: matching.map(instance_) };
+  }
+  return { date, total: entries.length, instances: entries.map(instance_) };
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function instance_(entry) {
+  return {
+    key: entry._activityKey,
+    start: entry['Start Date/time'],
+    startEpoch: Number(entry['Start Date/time (Epoch)']) || 0,
+    end: entry['[Sleep] End Date/time'] || '',
+    endEpoch: Number(entry['[Sleep] End Date/time (Epoch)']) || 0,
+    detail: entryDetail_(entry)
   };
 }
 
-// Utility formatting calculations (copied from original codebase for client-side evaluation)
-function newKey_(prefix) { return `${prefix}-${Math.random().toString(36).substring(2, 12)}`; }
-function entryDate_(entry) { const m = String(entry['Start Date/time'] || '').match(/^(\d{4}-\d{2}-\d{2})/); return m ? m[1] : ''; }
-function volumeMl_(v, u) { const n = Number(v) || 0; return String(u).toUpperCase() === 'OZ' ? n * 29.5735 : n; }
+function entryDetail(entry) { return entryDetail_(entry); }
+
+function entryDetail_(entry) {
+  if (entry.Type === 'Bottle Feed') return `${Math.round(bottleMl_(entry))} mL ${entry['[Bottle Feed] Type'] || ''}`;
+  if (entry.Type === 'Diaper') {
+    const t = entry['[Diaper] Type'] || 'Diaper';
+    const d = entry['[Diaper] Detail'] || '';
+    return d ? `${t}: ${d}` : `${t} diaper`;
+  }
+  if (entry.Type === 'Sleep') return entry['[Sleep] End Date/time (Epoch)'] ? formatDuration_(entry['[Sleep] Duration (Seconds)']) : 'Timer running';
+  return `${entry['[Solid Feed] Meal'] || ''} ${entry['[Solid Feed] Food'] || ''}`.trim();
+}
+
+function entryDate_(entry) {
+  const m = String(entry['Start Date/time'] || '').match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : '';
+}
+
+function volumeMl_(v, u) {
+  const n = Number(v) || 0;
+  return String(u).toUpperCase() === 'OZ' ? n * 29.5735 : n;
+}
+
 function bottleMl_(e) {
   const gen = volumeMl_(e['[Bottle Feed] Volume'], e['[Bottle Feed] Volume Unit']);
   if (gen) return gen;
   return volumeMl_(e['[Bottle Feed] Formula Volume'], e['[Bottle Feed] Formula Volume Unit']) + volumeMl_(e['[Bottle Feed] Breast Milk Volume'], e['[Bottle Feed] Breast Milk Volume Unit']);
 }
-function entryDetail_(entry) {
-  if (entry.Type === 'Bottle Feed') return `${Math.round(bottleMl_(entry))} mL ${entry['[Bottle Feed] Type'] || ''}`;
-  if (entry.Type === 'Diaper') { const t = entry['[Diaper] Type'] || 'Diaper'; const d = entry['[Diaper] Detail'] || ''; return d ? `${t}: ${d}` : `${t} diaper`; }
-  if (entry.Type === 'Sleep') return entry['[Sleep] End Date/time (Epoch)'] ? formatDuration_(entry['[Sleep] Duration (Seconds)']) : 'Timer running';
-  return `${entry['[Solid Feed] Meal'] || ''} ${entry['[Solid Feed] Food'] || ''}`.trim();
-}
+
 function dateRange_(endDate, days) {
   const p = endDate.split('-').map(Number);
   const dates = [];
@@ -740,6 +848,7 @@ function dateRange_(endDate, days) {
   }
   return dates;
 }
+
 function sleepOverlap_(entry, date) {
   const start = Number(entry['Start Date/time (Epoch)']);
   const end = Number(entry['[Sleep] End Date/time (Epoch)']);
@@ -749,32 +858,84 @@ function sleepOverlap_(entry, date) {
   const to = from + 86400000;
   return Math.max(0, Math.floor((Math.min(end, to) - Math.max(start, from)) / 1000));
 }
-function round_(n, p) { const pw = Math.pow(10, p); return Math.round(n * pw) / pw; }
-function formatDuration_(s) { s = Number(s) || 0; const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); return h ? `${h}h ${m}m` : `${m}m`; }
-function localDate(d = new Date()) { const off = d.getTimezoneOffset() * 60000; return new Date(d.getTime() - off).toISOString().slice(0, 10); }
-function formatDateTimeString(d) { return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0'); }
-function showToast(msg, isError = false) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.style.background = isError ? '#e53e3e' : '#2d3748';
-  t.classList.remove('hidden'); setTimeout(() => t.classList.add('hidden'), 3000);
+
+function round_(n, p) {
+  const pw = Math.pow(10, p);
+  return Math.round(n * pw) / pw;
 }
-function closeOverlay() { document.getElementById('overlay-root').innerHTML = ''; }
-function activateNav(b) { document.querySelectorAll('.bottom-nav button').forEach(i => i.classList.remove('active')); if (b) b.classList.add('active'); }
-function escapeHtml(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function formatDuration_(s) {
+  s = Number(s) || 0;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function localDate(d = new Date()) {
+  const off = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - off).toISOString().slice(0, 10);
+}
+
+function formatDateTimeString(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+}
+
+function showToast(msg, isError = false) {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    t.style.position = 'fixed';
+    t.style.bottom = '80px';
+    t.style.left = '50%';
+    t.style.transform = 'translateX(-50%)';
+    t.style.padding = '10px 18px';
+    t.style.borderRadius = '20px';
+    t.style.color = '#fff';
+    t.style.fontSize = '0.9rem';
+    t.style.zIndex = '2000';
+    t.style.transition = 'opacity 0.3s ease';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.background = isError ? '#e53e3e' : '#2d3748';
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 3000);
+}
+
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function startSleepClock() {
   const active = state.home?.activeSleep;
   if (!active) return;
-  const tick = () => { const el = document.getElementById('sleep-clock'); if (el) el.textContent = clock((Date.now() - Number(active['Start Date/time (Epoch)'])) / 1000); };
-  tick(); state.sleepTimer = setInterval(tick, 1000);
+  const tick = () => {
+    const el = document.getElementById('sleep-clock');
+    if (el) el.textContent = clock((Date.now() - Number(active['Start Date/time (Epoch)'])) / 1000);
+    const sheetEl = document.getElementById('sheet-sleep-clock');
+    if (sheetEl) sheetEl.textContent = clock((Date.now() - Number(active['Start Date/time (Epoch)'])) / 1000);
+  };
+  tick();
+  state.sleepTimer = setInterval(tick, 1000);
 }
-function clock(s) { s = Math.max(0, Math.floor(s)); return [Math.floor(s/3600), Math.floor((s%3600)/60), s%60].map(v => String(v).padStart(2,'0')).join(':'); }
-function duration(s) { return formatDuration_(s); }
+
+function clock(s) {
+  s = Math.max(0, Math.floor(s));
+  return [Math.floor(s/3600), Math.floor((s%3600)/60), s%60].map(v => String(v).padStart(2,'0')).join(':');
+}
+
+function duration(s) {
+  return formatDuration_(s);
+}
+
 function formatTimeEntry(e) {
   const ep = Number(e['Start Date/time (Epoch)']);
   if (ep) return new Date(ep).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const m = String(e['Start Date/time'] || '').match(/ (\d{1,2}:\d{2})/);
   return m ? m[1] : '';
 }
+
 function relativeTime(e) {
   const ep = Number(e['[Sleep] End Date/time (Epoch)'] || e['Start Date/time (Epoch)']);
   if (!ep) return formatTimeEntry(e);
@@ -783,9 +944,17 @@ function relativeTime(e) {
   const hrs = Math.floor(mins / 60);
   return hrs < 24 ? `${hrs}h ${mins % 60}m ago` : `${Math.floor(hrs / 24)}d ago`;
 }
-function latestLabel(t) { return { 'Bottle Feed': 'Last feeding', 'Diaper': 'Last change', 'Sleep': 'Woke up', 'Solid Feed': 'Last meal' }[t]; }
+
+function latestLabel(t) {
+  return { 'Bottle Feed': 'Last feeding', 'Diaper': 'Last change', 'Sleep': 'Woke up', 'Solid Feed': 'Last meal' }[t] || 'Last entry';
+}
+
 function latestValue(e) {
-  if (e.Type === 'Bottle Feed') { const v = e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || ''; const u = e['[Bottle Feed] Volume Unit'] || ''; return `${v}<small>${u}</small>`; }
+  if (e.Type === 'Bottle Feed') {
+    const v = e['[Bottle Feed] Volume'] || e['[Bottle Feed] Formula Volume'] || '';
+    const u = e['[Bottle Feed] Volume Unit'] || '';
+    return `${v}<small>${u}</small>`;
+  }
   if (e.Type === 'Diaper') return escapeHtml((e['[Diaper] Type'] || 'Diaper').toLowerCase());
   if (e.Type === 'Sleep') return duration(e['[Sleep] Duration (Seconds)']);
   return escapeHtml(e['[Solid Feed] Meal'] || 'Meal');
