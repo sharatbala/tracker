@@ -33,16 +33,23 @@ function getApiUrl() {
 
 async function callApi(action, payload = {}) {
   const url = getApiUrl();
-  if (!url) {
-    throw new Error('Apps Script Web App URL is not configured.');
-  }
+  if (!url) throw new Error('Apps Script Web App URL is not configured.');
 
   const response = await fetch(url, {
     method: 'POST',
     body: JSON.stringify({ action, ...payload })
   });
-  return await response.json();
+  
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('API returned non-JSON:', text);
+    throw new Error('Invalid response from Google Apps Script. Check deployment permissions.');
+  }
 }
+
+
 
 async function initialize() {
   const saved = JSON.parse(localStorage.getItem('littlelog-settings') || '{}');
@@ -66,8 +73,8 @@ async function initialize() {
     dbInstance = await openDatabase();
     const bootstrap = await callApi('getBootstrap');
     
-    state.profiles = bootstrap.profiles.length ? bootstrap.profiles : ['Baby'];
-    state.caregivers = bootstrap.caregivers || ['Sharat', 'Marianne'];
+    state.profiles = bootstrap?.profiles?.length ? bootstrap.profiles : ['Baby'];
+    state.caregivers = bootstrap?.caregivers || ['Sharat', 'Marianne'];
 
     if (!state.profiles.includes(state.profile)) state.profile = state.profiles[0];
     if (!state.caregivers.includes(state.caregiver)) state.caregiver = state.caregivers[0];
@@ -264,6 +271,13 @@ function summarizeDay_(date, type, entries, allSleep) {
   return { date, total: entries.length, instances: entries.map(instance_) };
 }
 
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function instance_(entry) {
   return {
     key: entry._activityKey,
@@ -338,6 +352,78 @@ function renderActiveSleep(config, recent) {
         <button class="see-all" onclick="openDetail('Sleep')">See all →</button>
       </div>
     </article>`;
+}
+
+function renderDetail() {
+  const detail = state.detail;
+  if (!detail) return;
+
+  const typeConfig = TYPES[detail.type] || { title: detail.type, icon: '📋', color: '#f2ecdc' };
+
+  document.getElementById('detail-page').innerHTML = `
+    <div class="detail-header" style="background:${typeConfig.color}">
+      <button onclick="showHome()">← Back</button>
+      <h2>${typeConfig.icon} ${typeConfig.title} History</h2>
+      <button onclick="openEditor('${detail.type}')">+</button>
+    </div>
+    
+    <div class="detail-sub-banner">
+      <strong>${escapeHtml(detail.headline)}</strong>
+      <div class="detail-tabs">
+        <button class="${state.detailTab === 'calendar' ? 'active' : ''}" onclick="switchDetailTab('calendar')">Calendar</button>
+        <button class="${state.detailTab === 'list' ? 'active' : ''}" onclick="switchDetailTab('list')">List</button>
+      </div>
+    </div>
+
+    <div class="detail-content">
+      ${state.detailTab === 'calendar' ? renderDetailCalendar(detail) : renderDetailList(detail)}
+    </div>`;
+}
+
+function switchDetailTab(tab) {
+  state.detailTab = tab;
+  renderDetail();
+}
+
+function renderDetailCalendar(detail) {
+  return `
+    <div class="calendar-buckets">
+      ${detail.buckets.slice().reverse().map(b => `
+        <div class="bucket-row">
+          <div class="bucket-date">
+            <strong>${formatDate(b.date)}</strong>
+            <span>${b.total ? `${Math.round(b.total)}${detail.type === 'Bottle Feed' ? ' mL' : ''}` : '0'}</span>
+          </div>
+          <div class="bucket-instances">
+            ${b.instances.length ? b.instances.map(inst => `
+              <button class="instance-chip" onclick="openEditorByKey('${inst.key}')">
+                <small>${inst.start.slice(11, 16)}</small>
+                <span>${escapeHtml(inst.detail)}</span>
+              </button>
+            `).join('') : '<span class="empty-instance">No entries</span>'}
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
+function renderDetailList(detail) {
+  return `
+    <div class="list-entries">
+      ${detail.entries.length ? detail.entries.map(entry => `
+        <button class="list-entry-row" onclick="openEditorByKey('${entry._activityKey}')">
+          <div>
+            <strong>${escapeHtml(entry['Start Date/time'])}</strong>
+            <small>${escapeHtml(entry['Created By Caregiver'] || '')}</small>
+          </div>
+          <span>${escapeHtml(entryDetail_(entry))}</span>
+        </button>
+      `).join('') : '<div class="empty-instance">No entries found for this range</div>'}
+    </div>`;
+}
+
+function entryDetail(entry) {
+  return entryDetail_(entry);
 }
 
 async function openEditorByKey(key) {

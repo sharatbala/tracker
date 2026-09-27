@@ -1,11 +1,28 @@
 const SHEET_NAME = 'Core Data';
 const CAREGIVERS = ['Sharat', 'Marianne'];
 
-function doGet() {
-  return HtmlService.createTemplateFromFile('Index')
-    .evaluate()
-    .setTitle('LittleLog')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+// Handle incoming requests from your hosted front-end
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const action = data.action;
+    
+    if (action === 'getBootstrap') {
+      return jsonResponse_(getBootstrapData_());
+    } else if (action === 'batchSync') {
+      const result = batchSyncData_(data.mutations);
+      return jsonResponse_(result);
+    }
+    
+    return jsonResponse_({ error: 'Invalid action' });
+  } catch (err) {
+    return jsonResponse_({ error: err.toString() });
+  }
+}
+
+function doGet(e) {
+  // Optional: Handle simple GET requests or health checks
+  return jsonResponse_({ status: 'LittleLog API is active' });
 }
 
 function getSheet_() {
@@ -14,7 +31,7 @@ function getSheet_() {
   return sheet;
 }
 
-function getBootstrap() {
+function getBootstrapData_() {
   const sheet = getSheet_();
   const rows = sheet.getDataRange().getDisplayValues();
   const headers = rows[0] || [];
@@ -29,12 +46,11 @@ function getBootstrap() {
   return {
     profiles: profiles,
     caregivers: CAREGIVERS,
-    allRows: rows // Full sheet rows sent down for local IndexedDB hydration
+    allRows: rows
   };
 }
 
-// Background sync route that processes batch changes from IndexedDB queue
-function batchSyncData(mutations) {
+function batchSyncData_(mutations) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
 
@@ -69,4 +85,9 @@ function batchSyncData(mutations) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function jsonResponse_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
